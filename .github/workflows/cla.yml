@@ -1,0 +1,30 @@
+name: "CLA Assistant"
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize, reopened]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  CLAAssistant:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "CLA Assistant"
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read and agree to the terms of the AeroBeat-Workouts CLA.') || github.event_name == 'pull_request_target'
+        uses: contributor-assistant/github-action@v2.3.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: 'signatures/version1/cla.json'
+          path-to-cla: 'https://github.com/AeroBeat-Workouts/aerobeat-docs/blob/main/docs/licensing/CLA.md'
+          branch: 'cla-signatures'
+          allowlist: bot*
+          create-file-commit-message: 'Creating file for storing CLA Signatures'
+          signed-commit-message: '$contributorName has signed the CLA in $owner/$repo#$pullRequestNo'
+          custom-notsigned-prcomment: 'Thank you for your submission! We require all contributors to sign our Contributor License Agreement. Please comment "I have read and agree to the terms of the AeroBeat-Workouts CLA." to sign.'

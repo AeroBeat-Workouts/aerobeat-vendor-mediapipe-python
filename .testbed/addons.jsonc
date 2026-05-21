@@ -1,0 +1,18 @@
+{
+  "$schema": "https://chickensoft.games/schemas/addons.schema.json",
+  "addons": {
+    // Tool-template bootstrap pins the shared tool/workflow contract.
+    // `main` is intentional until aerobeat-tool-core starts tagging releases.
+    "aerobeat-tool-core": {
+      "url": "git@github.com:AeroBeat-Workouts/aerobeat-tool-core.git",
+      "checkout": "main",
+      "subfolder": "/"
+    },
+    // GUT drives the repo-local test suite inside the hidden testbed/workbench.
+    "gut": {
+      "url": "git@github.com:bitwes/Gut.git",
+      "checkout": "main",
+      "subfolder": "/addons/gut"
+    }
+  }
+}
