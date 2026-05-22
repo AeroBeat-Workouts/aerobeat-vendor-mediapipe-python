@@ -8,6 +8,7 @@ const DEFAULT_MIN_VISIBILITY := 0.35
 const DEFAULT_GESTURE_EVAL_INTERVAL_FRAMES := 1
 const DEFAULT_SURFACE_MODE := "attach"
 const DEFAULT_PYTHON_EXECUTABLE := "python3"
+const DEFAULT_RUNTIME_ENTRYPOINT := "runtime/mediapipe_runtime_probe.py"
 const DEFAULT_BOOT_TIMEOUT_MS := 8000
 const DEFAULT_SHUTDOWN_TIMEOUT_MS := 5000
 const DEFAULT_HEALTH_POLL_INTERVAL_MS := 250
@@ -54,7 +55,7 @@ static func vendor_defaults() -> Dictionary:
 		},
 		"runtime": {
 			"python_executable": DEFAULT_PYTHON_EXECUTABLE,
-			"entrypoint": "",
+			"entrypoint": DEFAULT_RUNTIME_ENTRYPOINT,
 			"working_directory": "",
 			"arguments": [],
 			"environment": {},
