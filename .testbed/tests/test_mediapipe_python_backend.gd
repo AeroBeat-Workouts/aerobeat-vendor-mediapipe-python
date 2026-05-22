@@ -31,8 +31,12 @@ class FakeRuntimeBridge extends "res://../src/MediaPipePythonRuntimeBridge.gd":
 		"timestamp_ms": 123,
 		"source_kind": "live_camera",
 		"source_id": "/dev/video0",
-		"tracking_state": "idle",
-		"frame_size": {"x": 1280, "y": 720}
+		"tracking_state": "tracked",
+		"frame_size": {"x": 1280, "y": 720},
+		"landmarks": [
+			{"id": 0, "x": 0.25, "y": 0.4, "z": -0.15, "visibility": 0.95},
+			{"id": 12, "x": 0.61, "y": 0.52, "z": -0.09, "visibility": 0.88}
+		]
 	}
 	var health := MediaPipePythonRuntimeHealth.running({
 		"camera_accessible": true,
@@ -101,8 +105,11 @@ func test_inventory_and_frame_mapper_normalize_vendor_payloads() -> void:
 
 	var frame := MediaPipePythonFrameMapper.map_raw_frame({
 		"timestamp_ms": 42,
-		"tracking_state": "idle",
-		"frame_size": {"x": 640, "y": 480}
+		"tracking_state": "tracked",
+		"frame_size": {"x": 640, "y": 480},
+		"landmarks": [
+			{"id": 1, "x": 0.2, "y": 0.3, "z": -0.1, "visibility": 0.9}
+		]
 	}, {
 		"source": {"camera_id": "/dev/video0"},
 		"preview": {"flip_horizontal": false}
@@ -110,9 +117,11 @@ func test_inventory_and_frame_mapper_normalize_vendor_payloads() -> void:
 	assert_eq(frame["backend"], "mediapipe_python")
 	assert_eq(frame["source_id"], "/dev/video0")
 	assert_false(frame["preview_transform"]["flip_horizontal"])
-	assert_eq(frame["tracking_state"], "idle")
+	assert_eq(frame["tracking_state"], "tracked")
 	assert_eq(frame["confidence"], 0.0)
-	assert_eq(frame["landmarks"].size(), 0)
+	assert_eq(frame["landmarks"].size(), 1)
+	assert_eq(int(frame["landmarks"][0]["id"]), 1)
+	assert_eq(float(frame["landmarks"][0]["visibility"]), 0.9)
 
 func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> void:
 	var bridge := FakeRuntimeBridge.new()
@@ -134,9 +143,10 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 	assert_false(backend.get_state()["detail"][CameraTracking.DETAIL_TRACKING_READY])
 	assert_false(backend.get_runtime_health()["process_active"])
 	assert_eq(backend.get_tracking_frame()["backend"], "mediapipe_python")
-	assert_eq(backend.get_tracking_frame()["tracking_state"], "idle")
+	assert_eq(backend.get_tracking_frame()["tracking_state"], "tracked")
 	assert_eq(backend.get_tracking_frame()["frame_size"]["x"], 1280)
 	assert_eq(backend.get_tracking_frame()["confidence"], 0.0)
+	assert_eq(backend.get_tracking_frame()["landmarks"].size(), 2)
 	assert_eq(backend.get_preview_descriptor()["backend"], "mediapipe_python")
 	assert_eq(backend.list_cameras()[0]["camera_id"], "/dev/video0")
 	assert_eq(bridge.startup_configs[0]["runtime"]["entrypoint"], "python/main.py")

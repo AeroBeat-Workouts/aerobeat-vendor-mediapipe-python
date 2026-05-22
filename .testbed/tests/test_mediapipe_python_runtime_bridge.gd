@@ -25,7 +25,7 @@ func after_each() -> void:
 			dir.list_dir_end()
 		DirAccess.remove_absolute(_fixture_root)
 
-func test_startup_captures_truthful_minimal_live_camera_sample_and_updates_health() -> void:
+func test_startup_emits_real_minimal_landmark_payload_when_sampled_landmarks_exist() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
 	var snapshot := bridge.startup(_make_runtime_config())
 
@@ -35,18 +35,44 @@ func test_startup_captures_truthful_minimal_live_camera_sample_and_updates_healt
 	assert_eq(snapshot["preview_descriptor"]["backend"], "mediapipe_python")
 	assert_eq(snapshot["raw_tracking_frame"]["source_kind"], "live_camera")
 	assert_eq(snapshot["raw_tracking_frame"]["source_id"], _fixture_root.path_join("video0"))
-	assert_eq(snapshot["raw_tracking_frame"]["tracking_state"], "idle")
+	assert_eq(snapshot["raw_tracking_frame"]["tracking_state"], "tracked")
 	assert_eq(int(snapshot["raw_tracking_frame"]["frame_size"]["x"]), 1280)
 	assert_eq(int(snapshot["raw_tracking_frame"]["frame_size"]["y"]), 720)
 	assert_true(int(snapshot["raw_tracking_frame"]["timestamp_ms"]) > 0)
 	assert_false(snapshot["raw_tracking_frame"].has("confidence"))
-	assert_false(snapshot["raw_tracking_frame"].has("landmarks"))
+	assert_true(snapshot["raw_tracking_frame"].has("landmarks"))
+	assert_eq(snapshot["raw_tracking_frame"]["landmarks"].size(), 2)
+	assert_eq(int(snapshot["raw_tracking_frame"]["landmarks"][0]["id"]), 0)
+	assert_eq(float(snapshot["raw_tracking_frame"]["landmarks"][0]["x"]), 0.25)
+	assert_eq(float(snapshot["raw_tracking_frame"]["landmarks"][0]["y"]), 0.4)
+	assert_eq(float(snapshot["raw_tracking_frame"]["landmarks"][0]["z"]), -0.15)
+	assert_eq(float(snapshot["raw_tracking_frame"]["landmarks"][0]["visibility"]), 0.95)
+	assert_eq(int(snapshot["raw_tracking_frame"]["landmarks"][1]["id"]), 12)
 	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_RUNNING)
 	assert_true(bridge.poll_health()["runtime_available"])
 	assert_true(bridge.poll_health()["camera_accessible"])
 	assert_false(bridge.poll_health()["process_active"])
 	assert_false(bridge.poll_health()["tracking_active"])
 	assert_eq(bridge.poll_health()["selected_camera_id"], _fixture_root.path_join("video0"))
+
+func test_startup_keeps_tracking_idle_when_sampled_frame_has_no_pose_landmarks() -> void:
+	var bridge = MediaPipePythonRuntimeBridge.new()
+	var snapshot := bridge.startup(_make_runtime_config({
+		"runtime": {
+			"environment": {
+				"AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": JSON.stringify({
+					_fixture_root.path_join("video0"): {"width": 800, "height": 600, "timestamp_ms": 1710000000999},
+					_fixture_root.path_join("video2"): {"width": 640, "height": 480, "timestamp_ms": 1710000000456}
+				})
+			}
+		}
+	}))
+
+	assert_true(snapshot["ok"])
+	assert_eq(snapshot["raw_tracking_frame"]["tracking_state"], "idle")
+	assert_false(snapshot["raw_tracking_frame"].has("landmarks"))
+	assert_false(bridge.poll_health()["tracking_active"])
+	assert_true(bridge.poll_health()["healthy"])
 
 func test_list_cameras_enumerates_runtime_surface_using_last_runtime_config() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
@@ -87,6 +113,33 @@ func test_startup_fails_honestly_when_requested_camera_is_missing() -> void:
 	assert_eq(snapshot["cameras"].size(), 2)
 	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_ERROR)
 
+func test_startup_fails_honestly_when_landmark_inference_fails() -> void:
+	var bridge = MediaPipePythonRuntimeBridge.new()
+	var snapshot := bridge.startup(_make_runtime_config({
+		"runtime": {
+			"environment": {
+				"AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": JSON.stringify({
+					_fixture_root.path_join("video0"): {
+						"width": 1280,
+						"height": 720,
+						"timestamp_ms": 1710000000123,
+						"inference_error": {
+							"code": "mediapipe_inference_failed",
+							"message": "Fixture landmark inference exploded honestly"
+						}
+					},
+					_fixture_root.path_join("video2"): {"width": 640, "height": 480, "timestamp_ms": 1710000000456}
+				})
+			}
+		}
+	}))
+
+	assert_false(snapshot["ok"])
+	assert_eq(snapshot["error_info"]["code"], "mediapipe_inference_failed")
+	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_ERROR)
+	assert_true(bridge.poll_health()["camera_accessible"])
+	assert_false(bridge.poll_health()["tracking_active"])
+
 func test_startup_fails_honestly_when_camera_sample_cannot_be_captured() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
 	var snapshot := bridge.startup(_make_runtime_config({}, false))
@@ -104,7 +157,15 @@ func _make_runtime_config(overrides: Dictionary = {}, include_sample_fixture: bo
 	}
 	if include_sample_fixture:
 		environment["AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON"] = JSON.stringify({
-			_fixture_root.path_join("video0"): {"width": 1280, "height": 720, "timestamp_ms": 1710000000123},
+			_fixture_root.path_join("video0"): {
+				"width": 1280,
+				"height": 720,
+				"timestamp_ms": 1710000000123,
+				"landmarks": [
+					{"id": 0, "x": 0.25, "y": 0.4, "z": -0.15, "visibility": 0.95},
+					{"id": 12, "x": 0.61, "y": 0.52, "z": -0.09, "visibility": 0.88}
+				]
+			},
 			_fixture_root.path_join("video2"): {"width": 640, "height": 480, "timestamp_ms": 1710000000456}
 		})
 
