@@ -6,7 +6,13 @@ import os
 import platform
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
+
+
+_DEFAULT_POSE_LANDMARKER_MODEL_PATHS: Sequence[str] = (
+    "models/pose_landmarker_lite.task",
+    "runtime/models/pose_landmarker_lite.task",
+)
 
 
 def _now_iso() -> str:
@@ -25,6 +31,22 @@ def _read_request(path: str) -> Dict[str, Any]:
 def _runtime_env(runtime: Dict[str, Any]) -> Dict[str, Any]:
     environment = runtime.get("environment", {})
     return environment if isinstance(environment, dict) else {}
+
+
+def _working_directory(runtime: Dict[str, Any]) -> str:
+    working_directory = str(runtime.get("working_directory", "")).strip()
+    if working_directory != "":
+        return os.path.abspath(working_directory)
+    return os.getcwd()
+
+
+def _resolve_runtime_path(runtime: Dict[str, Any], candidate: str) -> str:
+    if candidate == "":
+        return ""
+    expanded = os.path.expanduser(candidate)
+    if os.path.isabs(expanded):
+        return os.path.abspath(expanded)
+    return os.path.abspath(os.path.join(_working_directory(runtime), expanded))
 
 
 def _camera_root(runtime: Dict[str, Any]) -> str:
@@ -281,7 +303,209 @@ def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any]) -> Dict
 
 
 
-def _infer_pose_landmarks(sampled: Dict[str, Any]) -> Dict[str, Any]:
+def _landmarks_from_legacy_results(results: Any) -> List[Dict[str, float]]:
+    pose_landmarks = getattr(results, "pose_landmarks", None)
+    landmarks_source = getattr(pose_landmarks, "landmark", None) if pose_landmarks is not None else None
+    landmarks: List[Dict[str, float]] = []
+    if landmarks_source is not None:
+        for index, landmark in enumerate(landmarks_source):
+            landmarks.append(
+                {
+                    "id": index,
+                    "x": float(getattr(landmark, "x", 0.0)),
+                    "y": float(getattr(landmark, "y", 0.0)),
+                    "z": float(getattr(landmark, "z", 0.0)),
+                    "visibility": float(getattr(landmark, "visibility", 0.0)),
+                }
+            )
+    return landmarks
+
+
+
+def _landmarks_from_tasks_result(result: Any) -> List[Dict[str, float]]:
+    pose_landmarks = getattr(result, "pose_landmarks", None)
+    if not isinstance(pose_landmarks, list) or len(pose_landmarks) == 0:
+        return []
+
+    first_pose = pose_landmarks[0]
+    if not isinstance(first_pose, list):
+        return []
+
+    landmarks: List[Dict[str, float]] = []
+    for index, landmark in enumerate(first_pose):
+        landmarks.append(
+            {
+                "id": index,
+                "x": float(getattr(landmark, "x", 0.0)),
+                "y": float(getattr(landmark, "y", 0.0)),
+                "z": float(getattr(landmark, "z", 0.0)),
+                "visibility": float(getattr(landmark, "visibility", 0.0)),
+            }
+        )
+    return landmarks
+
+
+
+def _resolve_pose_landmarker_model_path(runtime: Dict[str, Any]) -> str:
+    environment = _runtime_env(runtime)
+    candidate_values = [
+        str(runtime.get("pose_landmarker_model_path", "")).strip(),
+        str(runtime.get("model_asset_path", "")).strip(),
+        str(environment.get("AEROBEAT_MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH", "")).strip(),
+        str(environment.get("MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH", os.environ.get("MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH", ""))).strip(),
+    ]
+
+    for candidate in candidate_values:
+        if candidate == "":
+            continue
+        resolved = _resolve_runtime_path(runtime, candidate)
+        if os.path.isfile(resolved):
+            return resolved
+
+    for candidate in _DEFAULT_POSE_LANDMARKER_MODEL_PATHS:
+        resolved = _resolve_runtime_path(runtime, candidate)
+        if os.path.isfile(resolved):
+            return resolved
+
+    return ""
+
+
+
+def _infer_pose_landmarks_legacy(mp: Any, frame_rgb: Any) -> Dict[str, Any]:
+    if not hasattr(mp, "solutions") or not hasattr(mp.solutions, "pose"):
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_package_unsupported",
+                "message": "Installed MediaPipe package does not expose mediapipe.solutions.pose for legacy pose inference",
+            },
+        }
+
+    with mp.solutions.pose.Pose(static_image_mode=True) as pose:
+        results = pose.process(frame_rgb)
+
+    return {
+        "ok": True,
+        "landmarks": _landmarks_from_legacy_results(results),
+        "inference_backend": "mediapipe_solutions_pose",
+    }
+
+
+
+def _infer_pose_landmarks_tasks(mp: Any, runtime: Dict[str, Any], frame_rgb: Any) -> Dict[str, Any]:
+    model_path = _resolve_pose_landmarker_model_path(runtime)
+    if model_path == "":
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_model_missing",
+                "message": "MediaPipe tasks pose inference requires a pose landmarker .task model asset, but none was found. Checked runtime.pose_landmarker_model_path, runtime.model_asset_path, AEROBEAT_MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH, MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH, and default repo model locations.",
+            },
+        }
+
+    try:
+        from mediapipe.tasks.python import vision  # type: ignore
+        from mediapipe.tasks.python.core.base_options import BaseOptions  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_package_unsupported",
+                "message": f"Installed MediaPipe package exposes mediapipe.tasks but does not provide PoseLandmarker imports usable on this host: {exc}",
+            },
+        }
+
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+    options = vision.PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        running_mode=vision.RunningMode.IMAGE,
+        num_poses=1,
+    )
+
+    with vision.PoseLandmarker.create_from_options(options) as landmarker:
+        result = landmarker.detect(mp_image)
+
+    return {
+        "ok": True,
+        "landmarks": _landmarks_from_tasks_result(result),
+        "inference_backend": "mediapipe_tasks_pose_landmarker",
+        "model_asset_path": model_path,
+    }
+
+
+
+def _infer_pose_landmarks_with_mediapipe(runtime: Dict[str, Any], frame_bgr: Any) -> Dict[str, Any]:
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "opencv_unavailable",
+                "message": f"OpenCV import failed while converting the sampled frame for inference: {exc}",
+            },
+        }
+
+    try:
+        import mediapipe as mp  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_unavailable",
+                "message": f"MediaPipe import failed while inferring pose landmarks from the sampled frame: {exc}",
+            },
+        }
+
+    try:
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_inference_failed",
+                "message": f"OpenCV could not convert the sampled frame for MediaPipe inference: {exc}",
+            },
+        }
+
+    has_legacy_pose = hasattr(mp, "solutions") and hasattr(mp.solutions, "pose")
+    has_tasks_api = hasattr(mp, "tasks") and hasattr(mp, "Image") and hasattr(mp, "ImageFormat")
+
+    if has_legacy_pose:
+        try:
+            return _infer_pose_landmarks_legacy(mp, frame_rgb)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe legacy pose inference failed for the sampled frame: {exc}",
+                },
+            }
+
+    if has_tasks_api:
+        try:
+            return _infer_pose_landmarks_tasks(mp, runtime, frame_rgb)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe tasks pose inference failed for the sampled frame: {exc}",
+                },
+            }
+
+    return {
+        "ok": False,
+        "error_info": {
+            "code": "mediapipe_package_unsupported",
+            "message": "Installed MediaPipe package exposes neither mediapipe.solutions.pose nor a usable mediapipe.tasks vision PoseLandmarker path",
+        },
+    }
+
+
+
+def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any]) -> Dict[str, Any]:
     raw_tracking_frame = sampled.get("raw_tracking_frame", {}).copy()
     notes = list(sampled.get("notes", []))
 
@@ -320,70 +544,30 @@ def _infer_pose_landmarks(sampled: Dict[str, Any]) -> Dict[str, Any]:
             "notes": notes,
         }
 
-    try:
-        import cv2  # type: ignore
-    except Exception as exc:
+    inferred = _infer_pose_landmarks_with_mediapipe(runtime, frame_bgr)
+    if not bool(inferred.get("ok", False)):
         return {
             "ok": False,
-            "error_info": {
-                "code": "opencv_unavailable",
-                "message": f"OpenCV import failed while converting the sampled frame for inference: {exc}",
-            },
-            "raw_tracking_frame": raw_tracking_frame,
-            "notes": notes,
-        }
-
-    try:
-        import mediapipe as mp  # type: ignore
-    except Exception as exc:
-        return {
-            "ok": False,
-            "error_info": {
-                "code": "mediapipe_unavailable",
-                "message": f"MediaPipe import failed while inferring pose landmarks from the sampled frame: {exc}",
-            },
-            "raw_tracking_frame": raw_tracking_frame,
-            "notes": notes,
-        }
-
-    try:
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        with mp.solutions.pose.Pose(static_image_mode=True) as pose:
-            results = pose.process(frame_rgb)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "error_info": {
+            "error_info": inferred.get("error_info", {
                 "code": "mediapipe_inference_failed",
-                "message": f"MediaPipe pose inference failed for the sampled frame: {exc}",
-            },
+                "message": "MediaPipe pose inference failed for the sampled frame",
+            }),
             "raw_tracking_frame": raw_tracking_frame,
             "notes": notes,
         }
 
-    pose_landmarks = getattr(results, "pose_landmarks", None)
-    landmarks_source = getattr(pose_landmarks, "landmark", None) if pose_landmarks is not None else None
-    landmarks: List[Dict[str, float]] = []
-    if landmarks_source is not None:
-        for index, landmark in enumerate(landmarks_source):
-            landmarks.append(
-                {
-                    "id": index,
-                    "x": float(getattr(landmark, "x", 0.0)),
-                    "y": float(getattr(landmark, "y", 0.0)),
-                    "z": float(getattr(landmark, "z", 0.0)),
-                    "visibility": float(getattr(landmark, "visibility", 0.0)),
-                }
-            )
-
-    if landmarks:
+    landmarks = inferred.get("landmarks", [])
+    if isinstance(landmarks, list) and landmarks:
         raw_tracking_frame["tracking_state"] = "tracked"
         raw_tracking_frame["landmarks"] = landmarks
-        notes.append(f"MediaPipe pose inference produced {len(landmarks)} landmark(s) from the sampled frame.")
+        notes.append(f"MediaPipe pose inference produced {len(landmarks)} landmark(s) from the sampled frame via {inferred.get('inference_backend', 'mediapipe') }.")
     else:
         raw_tracking_frame.pop("landmarks", None)
         raw_tracking_frame["tracking_state"] = "idle"
-        notes.append("MediaPipe pose inference found no landmarks in the sampled frame; tracking remains idle.")
+        notes.append(f"MediaPipe pose inference via {inferred.get('inference_backend', 'mediapipe')} found no landmarks in the sampled frame; tracking remains idle.")
+
+    if inferred.get("model_asset_path"):
+        notes.append(f"MediaPipe tasks pose landmarker used model asset '{inferred['model_asset_path']}'.")
 
     return {
         "ok": True,
@@ -508,7 +692,7 @@ def _success_response(request: Dict[str, Any]) -> Dict[str, Any]:
             "error_info": error_info,
         }
 
-    inferred = _infer_pose_landmarks(sampled)
+    inferred = _infer_pose_landmarks(sampled, runtime)
     if not bool(inferred.get("ok", False)):
         error_info = inferred.get("error_info", {
             "code": "mediapipe_inference_failed",

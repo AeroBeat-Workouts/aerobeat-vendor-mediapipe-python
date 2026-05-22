@@ -59,6 +59,7 @@ static func vendor_defaults() -> Dictionary:
 			"working_directory": "",
 			"arguments": [],
 			"environment": {},
+			"pose_landmarker_model_path": "",
 			"boot_timeout_ms": DEFAULT_BOOT_TIMEOUT_MS,
 			"shutdown_timeout_ms": DEFAULT_SHUTDOWN_TIMEOUT_MS,
 			"health_poll_interval_ms": DEFAULT_HEALTH_POLL_INTERVAL_MS

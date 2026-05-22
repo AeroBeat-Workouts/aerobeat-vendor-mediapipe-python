@@ -13,6 +13,26 @@ The current slice is intentionally a **truthful minimal sampled-frame runtime la
 - `MediaPipePythonRuntimeHealth` helpers for vendor/runtime diagnostics
 - `MediaPipePythonFrameMapper` helpers that normalize raw vendor frames toward the shared tracking-frame contract
 
+## MediaPipe package compatibility and model asset truth
+
+This repo now supports both of these host package shapes for the sampled live-camera landmark pass:
+
+- legacy `mediapipe.solutions.pose.Pose(...)`
+- tasks-era `mediapipe.tasks` + `PoseLandmarker`
+
+The tasks-era path requires a real `.task` pose-landmarker model asset. By default the runtime now looks for a repo-owned model at:
+
+- `models/pose_landmarker_lite.task`
+
+You can also override the model path through vendor runtime config:
+
+- `runtime.pose_landmarker_model_path`
+- `runtime.model_asset_path`
+- `runtime.environment.AEROBEAT_MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH`
+- host env `MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH`
+
+If the host only exposes the tasks-era MediaPipe API and no usable model asset is available, the runtime fails honestly with `mediapipe_model_missing` instead of pretending inference ran.
+
 ## Repository details
 
 - **Type:** AeroBeat vendor package
