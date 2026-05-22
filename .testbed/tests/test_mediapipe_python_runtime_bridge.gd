@@ -51,18 +51,46 @@ func test_startup_emits_real_minimal_landmark_payload_when_sampled_landmarks_exi
 	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_RUNNING)
 	assert_true(bridge.poll_health()["runtime_available"])
 	assert_true(bridge.poll_health()["camera_accessible"])
-	assert_false(bridge.poll_health()["process_active"])
-	assert_false(bridge.poll_health()["tracking_active"])
+	assert_true(bridge.poll_health()["process_active"])
+	assert_true(bridge.poll_health()["tracking_active"])
 	assert_eq(bridge.poll_health()["selected_camera_id"], _fixture_root.path_join("video0"))
 
-func test_startup_keeps_tracking_idle_when_sampled_frame_has_no_pose_landmarks() -> void:
+	var second := bridge.poll_snapshot()
+	assert_true(second["ok"])
+	assert_true(int(second["raw_tracking_frame"]["timestamp_ms"]) >= int(snapshot["raw_tracking_frame"]["timestamp_ms"]))
+	assert_eq(second["raw_tracking_frame"]["tracking_state"], "tracked")
+
+	var shutdown := bridge.shutdown()
+	assert_true(shutdown["ok"])
+	assert_false(bridge.poll_health()["process_active"])
+	assert_false(bridge.poll_health()["tracking_active"])
+	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_IDLE)
+
+func test_continuous_runtime_advances_timestamps_without_reconfigure() -> void:
+	var bridge = MediaPipePythonRuntimeBridge.new()
+	var snapshot := bridge.startup(_make_runtime_config())
+	assert_true(snapshot["ok"])
+	var first_timestamp := int(snapshot["raw_tracking_frame"]["timestamp_ms"])
+	OS.delay_msec(350)
+	var second := bridge.poll_snapshot()
+	OS.delay_msec(350)
+	var third := bridge.poll_snapshot()
+	assert_true(second["ok"])
+	assert_true(third["ok"])
+	assert_true(int(second["raw_tracking_frame"]["timestamp_ms"]) > first_timestamp)
+	assert_true(int(third["raw_tracking_frame"]["timestamp_ms"]) > int(second["raw_tracking_frame"]["timestamp_ms"]))
+	assert_true(bridge.poll_health()["process_active"])
+	assert_true(bridge.poll_health()["tracking_active"])
+	bridge.shutdown()
+
+func test_startup_keeps_tracking_idle_when_sampled_frame_has_no_pose_landmarks_but_loop_stays_active() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
 	var snapshot := bridge.startup(_make_runtime_config({
 		"runtime": {
 			"environment": {
 				"AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": JSON.stringify({
-					_fixture_root.path_join("video0"): {"width": 800, "height": 600, "timestamp_ms": 1710000000999},
-					_fixture_root.path_join("video2"): {"width": 640, "height": 480, "timestamp_ms": 1710000000456}
+					_fixture_root.path_join("video0"): {"width": 800, "height": 600},
+					_fixture_root.path_join("video2"): {"width": 640, "height": 480}
 				})
 			}
 		}
@@ -71,8 +99,10 @@ func test_startup_keeps_tracking_idle_when_sampled_frame_has_no_pose_landmarks()
 	assert_true(snapshot["ok"])
 	assert_eq(snapshot["raw_tracking_frame"]["tracking_state"], "idle")
 	assert_false(snapshot["raw_tracking_frame"].has("landmarks"))
-	assert_false(bridge.poll_health()["tracking_active"])
+	assert_true(bridge.poll_health()["tracking_active"])
+	assert_true(bridge.poll_health()["process_active"])
 	assert_true(bridge.poll_health()["healthy"])
+	bridge.shutdown()
 
 func test_list_cameras_enumerates_runtime_surface_using_last_runtime_config() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
@@ -82,9 +112,9 @@ func test_list_cameras_enumerates_runtime_surface_using_last_runtime_config() ->
 	var cameras := bridge.list_cameras()
 	assert_eq(cameras.size(), 2)
 	assert_eq(cameras[1]["camera_id"], _fixture_root.path_join("video2"))
-	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_IDLE)
+	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_RUNNING)
 	assert_true(bridge.poll_health()["healthy"])
-	assert_eq(bridge.poll_health()["probe_operation"], "list_cameras")
+	bridge.shutdown()
 
 func test_startup_rejects_unsupported_video_file_mode_honestly() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
@@ -122,13 +152,12 @@ func test_startup_fails_honestly_when_landmark_inference_fails() -> void:
 					_fixture_root.path_join("video0"): {
 						"width": 1280,
 						"height": 720,
-						"timestamp_ms": 1710000000123,
 						"inference_error": {
 							"code": "mediapipe_inference_failed",
 							"message": "Fixture landmark inference exploded honestly"
 						}
 					},
-					_fixture_root.path_join("video2"): {"width": 640, "height": 480, "timestamp_ms": 1710000000456}
+					_fixture_root.path_join("video2"): {"width": 640, "height": 480}
 				})
 			}
 		}
@@ -160,18 +189,18 @@ func _make_runtime_config(overrides: Dictionary = {}, include_sample_fixture: bo
 			_fixture_root.path_join("video0"): {
 				"width": 1280,
 				"height": 720,
-				"timestamp_ms": 1710000000123,
 				"landmarks": [
 					{"id": 0, "x": 0.25, "y": 0.4, "z": -0.15, "visibility": 0.95},
 					{"id": 12, "x": 0.61, "y": 0.52, "z": -0.09, "visibility": 0.88}
 				]
 			},
-			_fixture_root.path_join("video2"): {"width": 640, "height": 480, "timestamp_ms": 1710000000456}
+			_fixture_root.path_join("video2"): {"width": 640, "height": 480}
 		})
 
 	var config := MediaPipePythonConfig.make_vendor_runtime_config({
 		"runtime": {
-			"environment": environment
+			"environment": environment,
+			"health_poll_interval_ms": 100
 		}
 	})
 	_deep_merge(config, overrides)

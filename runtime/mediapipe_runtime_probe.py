@@ -8,11 +8,14 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-
 _DEFAULT_POSE_LANDMARKER_MODEL_PATHS: Sequence[str] = (
     "models/pose_landmarker_lite.task",
     "runtime/models/pose_landmarker_lite.task",
 )
+
+_SESSION_SNAPSHOT_FILENAME = "runtime_snapshot.json"
+_SESSION_STOP_FILENAME = "stop"
+_SESSION_REQUEST_FILENAME = "request.json"
 
 
 def _now_iso() -> str:
@@ -96,7 +99,7 @@ def _base_health(operation: str, runtime: Dict[str, Any]) -> Dict[str, Any]:
         "healthy": operation == "list_cameras",
         "last_error": {},
         "notes": [
-            "Runtime probe captures one truthful live-camera sample and runs one sampled pose-landmark inference pass; continuous tracking is not implemented yet."
+            "Runtime now supports a short-lived truthful continuous live-camera loop for repeated raw frame updates; broader public temporal semantics remain upstream-owned."
         ],
         "probe_operation": operation,
         "python_executable": sys.executable,
@@ -115,11 +118,9 @@ def _sample_fixture_map(runtime: Dict[str, Any]) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-
 def _normalize_fixture_landmark(camera_id: str, landmark: Any, index: int) -> Dict[str, float]:
     if not isinstance(landmark, dict):
         raise ValueError(f"Camera sample fixture for '{camera_id}' landmark {index} must be an object")
-
     landmark_id = int(landmark.get("id", index))
     return {
         "id": landmark_id,
@@ -128,7 +129,6 @@ def _normalize_fixture_landmark(camera_id: str, landmark: Any, index: int) -> Di
         "z": float(landmark.get("z", 0.0)),
         "visibility": float(landmark.get("visibility", 0.0)),
     }
-
 
 
 def _raw_tracking_frame_base(camera_id: str, width: int, height: int, timestamp_ms: int) -> Dict[str, Any]:
@@ -141,18 +141,18 @@ def _raw_tracking_frame_base(camera_id: str, width: int, height: int, timestamp_
     }
 
 
-
-def _sample_from_fixture(camera_id: str, runtime: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    fixtures = _sample_fixture_map(runtime)
-    fixture = fixtures.get(camera_id)
-    if not isinstance(fixture, dict):
-        return None
-
+def _normalize_fixture_sample(camera_id: str, fixture: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
     width = int(fixture.get("width", 0))
     height = int(fixture.get("height", 0))
-    timestamp_ms = int(fixture.get("timestamp_ms", _now_ms()))
     if width <= 0 or height <= 0:
         raise ValueError(f"Camera sample fixture for '{camera_id}' must provide positive width/height")
+
+    timestamp_ms = int(fixture.get("timestamp_ms", _now_ms()))
+    if dynamic_timestamp:
+        if fixture.get("timestamp_step_ms") is not None:
+            timestamp_ms += int(fixture.get("timestamp_step_ms", 0)) * max(0, sample_index)
+        else:
+            timestamp_ms = _now_ms()
 
     raw_tracking_frame = _raw_tracking_frame_base(camera_id, width, height, timestamp_ms)
     notes = [f"Captured sample frame for '{camera_id}' via configured fixture dimensions {width}x{height}."]
@@ -187,6 +187,21 @@ def _sample_from_fixture(camera_id: str, runtime: Dict[str, Any]) -> Optional[Di
     }
 
 
+def _sample_from_fixture(camera_id: str, runtime: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Optional[Dict[str, Any]]:
+    fixtures = _sample_fixture_map(runtime)
+    fixture = fixtures.get(camera_id)
+    if not isinstance(fixture, dict):
+        return None
+
+    sequence = fixture.get("sequence")
+    if isinstance(sequence, list) and sequence:
+        chosen = sequence[min(sample_index, len(sequence) - 1)]
+        if not isinstance(chosen, dict):
+            raise ValueError(f"Camera sample fixture sequence for '{camera_id}' must contain objects")
+        return _normalize_fixture_sample(camera_id, chosen, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
+
+    return _normalize_fixture_sample(camera_id, fixture, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
+
 
 def _camera_device_index(camera_id: str) -> Optional[int]:
     if os.path.dirname(camera_id) != "/dev":
@@ -195,7 +210,6 @@ def _camera_device_index(camera_id: str) -> Optional[int]:
     if basename.startswith("video") and basename[5:].isdigit():
         return int(basename[5:])
     return None
-
 
 
 def _capture_frame_with_opencv_source(cv2: Any, camera_id: str, capture_source: Any, source_label: str) -> Dict[str, Any]:
@@ -264,9 +278,8 @@ def _capture_frame_with_opencv_source(cv2: Any, camera_id: str, capture_source: 
         capture.release()
 
 
-
-def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any]) -> Dict[str, Any]:
-    fixture_sample = _sample_from_fixture(camera_id, runtime)
+def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
+    fixture_sample = _sample_from_fixture(camera_id, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
     if fixture_sample is not None:
         return {"ok": True, **fixture_sample}
 
@@ -302,7 +315,6 @@ def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any]) -> Dict
     return last_failure
 
 
-
 def _landmarks_from_legacy_results(results: Any) -> List[Dict[str, float]]:
     pose_landmarks = getattr(results, "pose_landmarks", None)
     landmarks_source = getattr(pose_landmarks, "landmark", None) if pose_landmarks is not None else None
@@ -319,7 +331,6 @@ def _landmarks_from_legacy_results(results: Any) -> List[Dict[str, float]]:
                 }
             )
     return landmarks
-
 
 
 def _landmarks_from_tasks_result(result: Any) -> List[Dict[str, float]]:
@@ -343,7 +354,6 @@ def _landmarks_from_tasks_result(result: Any) -> List[Dict[str, float]]:
             }
         )
     return landmarks
-
 
 
 def _resolve_pose_landmarker_model_path(runtime: Dict[str, Any]) -> str:
@@ -370,7 +380,6 @@ def _resolve_pose_landmarker_model_path(runtime: Dict[str, Any]) -> str:
     return ""
 
 
-
 def _infer_pose_landmarks_legacy(mp: Any, frame_rgb: Any) -> Dict[str, Any]:
     if not hasattr(mp, "solutions") or not hasattr(mp.solutions, "pose"):
         return {
@@ -389,7 +398,6 @@ def _infer_pose_landmarks_legacy(mp: Any, frame_rgb: Any) -> Dict[str, Any]:
         "landmarks": _landmarks_from_legacy_results(results),
         "inference_backend": "mediapipe_solutions_pose",
     }
-
 
 
 def _infer_pose_landmarks_tasks(mp: Any, runtime: Dict[str, Any], frame_rgb: Any) -> Dict[str, Any]:
@@ -431,7 +439,6 @@ def _infer_pose_landmarks_tasks(mp: Any, runtime: Dict[str, Any], frame_rgb: Any
         "inference_backend": "mediapipe_tasks_pose_landmarker",
         "model_asset_path": model_path,
     }
-
 
 
 def _infer_pose_landmarks_with_mediapipe(runtime: Dict[str, Any], frame_bgr: Any) -> Dict[str, Any]:
@@ -504,7 +511,6 @@ def _infer_pose_landmarks_with_mediapipe(runtime: Dict[str, Any], frame_bgr: Any
     }
 
 
-
 def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any]) -> Dict[str, Any]:
     raw_tracking_frame = sampled.get("raw_tracking_frame", {}).copy()
     notes = list(sampled.get("notes", []))
@@ -560,7 +566,7 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any]) -> D
     if isinstance(landmarks, list) and landmarks:
         raw_tracking_frame["tracking_state"] = "tracked"
         raw_tracking_frame["landmarks"] = landmarks
-        notes.append(f"MediaPipe pose inference produced {len(landmarks)} landmark(s) from the sampled frame via {inferred.get('inference_backend', 'mediapipe') }.")
+        notes.append(f"MediaPipe pose inference produced {len(landmarks)} landmark(s) from the sampled frame via {inferred.get('inference_backend', 'mediapipe')}.")
     else:
         raw_tracking_frame.pop("landmarks", None)
         raw_tracking_frame["tracking_state"] = "idle"
@@ -576,47 +582,38 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any]) -> D
     }
 
 
+def _preview_descriptor(preview: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "enabled": bool(preview.get("enabled", True)),
+        "surface_mode": str(preview.get("surface_mode", "attach")),
+        "attached": False,
+        "flip_horizontal": bool(preview.get("flip_horizontal", True)),
+        "maintain_aspect_ratio": True,
+        "backend": "mediapipe_python",
+    }
 
-def _success_response(request: Dict[str, Any]) -> Dict[str, Any]:
+
+def _select_camera(request: Dict[str, Any]) -> Dict[str, Any]:
     operation = str(request.get("operation", "startup"))
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
     source = request.get("source", {}) if isinstance(request.get("source", {}), dict) else {}
-    preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
     cameras = _enumerate_cameras(runtime)
     health = _base_health(operation, runtime)
 
-    if operation == "list_cameras":
-        health["notes"].append(f"Enumerated {len(cameras)} camera candidate(s).")
-        return {
-            "ok": True,
-            "cameras": cameras,
-            "health": health,
-            "preview_descriptor": {},
-            "raw_tracking_frame": {},
-        }
-
     source_kind = str(source.get("kind", "live_camera"))
     if source_kind != "live_camera":
-        return {
-            "ok": False,
-            "cameras": cameras,
-            "health": {
-                **health,
-                "status": "error",
-                "healthy": False,
-                "last_error": {
-                    "code": "unsupported_source_kind",
-                    "message": f"MediaPipe Python probe only supports live_camera in this slice, got '{source_kind}'",
-                },
-            },
-            "error_info": {
-                "code": "unsupported_source_kind",
-                "message": f"MediaPipe Python probe only supports live_camera in this slice, got '{source_kind}'",
-            },
+        error_info = {
+            "code": "unsupported_source_kind",
+            "message": f"MediaPipe Python probe only supports live_camera in this slice, got '{source_kind}'",
         }
+        return {"ok": False, "cameras": cameras, "health": {**health, "status": "error", "healthy": False, "last_error": error_info}, "error_info": error_info}
 
     selected_camera_id = str(source.get("camera_id", "")).strip()
     if not cameras:
+        error_info = {
+            "code": "no_live_cameras_found",
+            "message": "No live camera candidates were found during MediaPipe Python probe",
+        }
         return {
             "ok": False,
             "cameras": [],
@@ -624,54 +621,46 @@ def _success_response(request: Dict[str, Any]) -> Dict[str, Any]:
                 **health,
                 "status": "error",
                 "healthy": False,
-                "last_error": {
-                    "code": "no_live_cameras_found",
-                    "message": "No live camera candidates were found during MediaPipe Python probe",
-                },
+                "last_error": error_info,
                 "notes": health["notes"] + ["Camera glob returned no candidates."],
             },
-            "error_info": {
-                "code": "no_live_cameras_found",
-                "message": "No live camera candidates were found during MediaPipe Python probe",
-            },
+            "error_info": error_info,
         }
 
     if selected_camera_id:
         selected = next((camera for camera in cameras if camera["camera_id"] == selected_camera_id), None)
         if selected is None:
-            return {
-                "ok": False,
-                "cameras": cameras,
-                "health": {
-                    **health,
-                    "status": "error",
-                    "healthy": False,
-                    "last_error": {
-                        "code": "camera_not_found",
-                        "message": f"Requested camera '{selected_camera_id}' was not found during MediaPipe Python probe",
-                    },
-                },
-                "error_info": {
-                    "code": "camera_not_found",
-                    "message": f"Requested camera '{selected_camera_id}' was not found during MediaPipe Python probe",
-                },
+            error_info = {
+                "code": "camera_not_found",
+                "message": f"Requested camera '{selected_camera_id}' was not found during MediaPipe Python probe",
             }
+            return {"ok": False, "cameras": cameras, "health": {**health, "status": "error", "healthy": False, "last_error": error_info}, "error_info": error_info}
     else:
         selected = cameras[0]
         selected_camera_id = selected["camera_id"]
 
-    health.update(
-        {
-            "camera_accessible": bool(selected.get("available", False)),
-            "healthy": bool(selected.get("available", False)),
-            "selected_camera_id": selected_camera_id,
-            "selected_camera_label": selected.get("label", selected_camera_id),
-            "notes": health["notes"]
-            + [f"Selected camera candidate '{selected_camera_id}' for truthful sample capture."],
-        }
-    )
+    health.update({
+        "camera_accessible": bool(selected.get("available", False)),
+        "healthy": bool(selected.get("available", False)),
+        "selected_camera_id": selected_camera_id,
+        "selected_camera_label": selected.get("label", selected_camera_id),
+        "notes": health["notes"] + [f"Selected camera candidate '{selected_camera_id}' for truthful sample capture."],
+    })
+    return {"ok": True, "runtime": runtime, "source": source, "selected": selected, "selected_camera_id": selected_camera_id, "cameras": cameras, "health": health}
 
-    sampled = _capture_live_camera_sample(selected_camera_id, runtime)
+
+def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
+    selection = _select_camera(request)
+    if not bool(selection.get("ok", False)):
+        return selection
+
+    runtime: Dict[str, Any] = selection["runtime"]
+    preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
+    selected_camera_id = str(selection["selected_camera_id"])
+    cameras = selection["cameras"]
+    health = selection["health"]
+
+    sampled = _capture_live_camera_sample(selected_camera_id, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
     if not bool(sampled.get("ok", False)):
         error_info = sampled.get("error_info", {
             "code": "camera_sample_failed",
@@ -716,16 +705,12 @@ def _success_response(request: Dict[str, Any]) -> Dict[str, Any]:
 
     raw_tracking_frame = inferred.get("raw_tracking_frame", {}).copy()
     landmarks = raw_tracking_frame.get("landmarks")
-
-    health.update(
-        {
-            "camera_accessible": True,
-            "healthy": True,
-            "tracking_active": False,
-            "notes": health["notes"] + inferred.get("notes", []),
-        }
-    )
-
+    health.update({
+        "camera_accessible": True,
+        "healthy": True,
+        "tracking_active": False,
+        "notes": health["notes"] + inferred.get("notes", []),
+    })
     if isinstance(landmarks, list) and len(landmarks) > 0:
         health["notes"].append(f"Returning {len(landmarks)} raw sampled pose landmark(s).")
     else:
@@ -736,29 +721,165 @@ def _success_response(request: Dict[str, Any]) -> Dict[str, Any]:
         "cameras": cameras,
         "selected_camera_id": selected_camera_id,
         "health": health,
-        "preview_descriptor": {
-            "enabled": bool(preview.get("enabled", True)),
-            "surface_mode": str(preview.get("surface_mode", "attach")),
-            "attached": False,
-            "flip_horizontal": bool(preview.get("flip_horizontal", True)),
-            "maintain_aspect_ratio": True,
-            "backend": "mediapipe_python",
-        },
+        "preview_descriptor": _preview_descriptor(preview),
         "raw_tracking_frame": raw_tracking_frame,
     }
 
+
+def _write_json_atomic(path: str, payload: Dict[str, Any]) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+    os.replace(temp_path, path)
+
+
+def _session_snapshot_path(session_dir: str) -> str:
+    return os.path.join(session_dir, _SESSION_SNAPSHOT_FILENAME)
+
+
+def _session_stop_path(session_dir: str) -> str:
+    return os.path.join(session_dir, _SESSION_STOP_FILENAME)
+
+
+def _session_request_path(session_dir: str) -> str:
+    return os.path.join(session_dir, _SESSION_REQUEST_FILENAME)
+
+
+def _write_session_snapshot(session_dir: str, payload: Dict[str, Any]) -> None:
+    _write_json_atomic(_session_snapshot_path(session_dir), payload)
+
+
+def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any], sample_index: int, loop_started_ms: int) -> Dict[str, Any]:
+    snapshot = sampled.copy()
+    health = snapshot.get("health", {}).copy()
+    health.update({
+        "status": "running",
+        "runtime_available": True,
+        "bridge_connected": True,
+        "process_active": True,
+        "camera_accessible": True,
+        "tracking_active": True,
+        "healthy": True,
+        "loop_iteration": sample_index,
+        "loop_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(loop_started_ms / 1000.0)),
+        "probed_at": _now_iso(),
+    })
+    notes = list(health.get("notes", []))
+    notes.append("Continuous runtime loop remains alive and may return idle raw frames when no pose is currently visible.")
+    health["notes"] = notes
+    snapshot["health"] = health
+    snapshot["ok"] = True
+    return snapshot
+
+
+def _continuous_error_snapshot(request: Dict[str, Any], failure: Dict[str, Any], sample_index: int, loop_started_ms: int) -> Dict[str, Any]:
+    runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
+    health = _base_health("startup", runtime)
+    existing = failure.get("health", {}) if isinstance(failure.get("health", {}), dict) else {}
+    health.update(existing)
+    error_info = failure.get("error_info", {"code": "runtime_loop_failed", "message": "Continuous MediaPipe runtime loop failed"})
+    health.update({
+        "status": "error",
+        "runtime_available": True,
+        "bridge_connected": True,
+        "process_active": False,
+        "tracking_active": False,
+        "healthy": False,
+        "last_error": error_info,
+        "loop_iteration": sample_index,
+        "loop_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(loop_started_ms / 1000.0)),
+        "probed_at": _now_iso(),
+    })
+    return {
+        "ok": False,
+        "cameras": failure.get("cameras", []),
+        "selected_camera_id": failure.get("selected_camera_id", ""),
+        "health": health,
+        "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+        "raw_tracking_frame": failure.get("raw_tracking_frame", {}),
+        "error_info": error_info,
+    }
+
+
+def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
+    os.makedirs(session_dir, exist_ok=True)
+    _write_json_atomic(_session_request_path(session_dir), request)
+    runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
+    interval_ms = max(30, int(runtime.get("health_poll_interval_ms", 250)))
+    loop_started_ms = _now_ms()
+    sample_index = 0
+
+    while True:
+        if os.path.exists(_session_stop_path(session_dir)):
+            shutdown_snapshot = {
+                "ok": True,
+                "cameras": _enumerate_cameras(runtime),
+                "selected_camera_id": "",
+                "health": {
+                    **_base_health("shutdown", runtime),
+                    "status": "idle",
+                    "runtime_available": True,
+                    "bridge_connected": True,
+                    "process_active": False,
+                    "camera_accessible": False,
+                    "tracking_active": False,
+                    "healthy": True,
+                    "notes": ["Continuous MediaPipe runtime session stopped cleanly."],
+                },
+                "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+                "raw_tracking_frame": {},
+            }
+            _write_session_snapshot(session_dir, shutdown_snapshot)
+            return 0
+
+        sampled = _sample_once(request, sample_index=sample_index, dynamic_timestamp=True)
+        if bool(sampled.get("ok", False)):
+            snapshot = _continuous_success_snapshot(request, sampled, sample_index, loop_started_ms)
+            _write_session_snapshot(session_dir, snapshot)
+        else:
+            snapshot = _continuous_error_snapshot(request, sampled, sample_index, loop_started_ms)
+            _write_session_snapshot(session_dir, snapshot)
+            return 1
+
+        sample_index += 1
+        time.sleep(float(interval_ms) / 1000.0)
+
+
+def _success_response(request: Dict[str, Any]) -> Dict[str, Any]:
+    operation = str(request.get("operation", "startup"))
+    runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
+    if operation == "list_cameras":
+        cameras = _enumerate_cameras(runtime)
+        health = _base_health(operation, runtime)
+        health["notes"].append(f"Enumerated {len(cameras)} camera candidate(s).")
+        return {
+            "ok": True,
+            "cameras": cameras,
+            "health": health,
+            "preview_descriptor": {},
+            "raw_tracking_frame": {},
+        }
+    return _sample_once(request)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--request-file", required=True)
+    parser.add_argument("--session-dir", default="")
     args = parser.parse_args()
 
     started = time.time()
     try:
         request = _read_request(args.request_file)
+        operation = str(request.get("operation", "startup"))
+        session_dir = str(args.session_dir).strip()
+        if session_dir != "" and operation in ("startup", "reconfigure"):
+            return _run_continuous_session(request, session_dir)
         response = _success_response(request)
-    except Exception as exc:  # pragma: no cover - fallback path
+    except Exception as exc:  # pragma: no cover
         response = {
             "ok": False,
             "cameras": [],
@@ -771,19 +892,13 @@ def main() -> int:
                 "camera_accessible": False,
                 "tracking_active": False,
                 "healthy": False,
-                "last_error": {
-                    "code": "runtime_probe_exception",
-                    "message": str(exc),
-                },
+                "last_error": {"code": "runtime_probe_exception", "message": str(exc)},
                 "notes": ["Python runtime probe raised an exception."],
                 "probed_at": _now_iso(),
                 "python_executable": sys.executable,
                 "python_version": platform.python_version(),
             },
-            "error_info": {
-                "code": "runtime_probe_exception",
-                "message": str(exc),
-            },
+            "error_info": {"code": "runtime_probe_exception", "message": str(exc)},
         }
 
     response.setdefault("health", {})["probe_duration_ms"] = int((time.time() - started) * 1000)

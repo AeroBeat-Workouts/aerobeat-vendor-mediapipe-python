@@ -40,8 +40,8 @@ class FakeRuntimeBridge extends "res://../src/MediaPipePythonRuntimeBridge.gd":
 	}
 	var health := MediaPipePythonRuntimeHealth.running({
 		"camera_accessible": true,
-		"tracking_active": false,
-		"process_active": false
+		"tracking_active": true,
+		"process_active": true
 	})
 
 	func startup(vendor_config: Dictionary) -> Dictionary:
@@ -72,6 +72,15 @@ class FakeRuntimeBridge extends "res://../src/MediaPipePythonRuntimeBridge.gd":
 
 	func poll_health() -> Dictionary:
 		return health.duplicate(true)
+
+	func poll_snapshot() -> Dictionary:
+		return {
+			"ok": true,
+			"health": health.duplicate(true),
+			"cameras": cameras.duplicate(true),
+			"preview_descriptor": preview_descriptor.duplicate(true),
+			"raw_tracking_frame": raw_tracking_frame.duplicate(true)
+		}
 
 func test_vendor_runtime_config_translation_keeps_public_shape_and_vendor_overrides() -> void:
 	var vendor_config := MediaPipePythonConfig.make_vendor_runtime_config({
@@ -142,8 +151,9 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 	assert_eq(observed_states[0]["state"], CameraTracking.STATE_STARTING)
 	assert_eq(backend.get_state()["state"], CameraTracking.STATE_RUNNING)
 	assert_true(backend.get_state()["detail"][CameraTracking.DETAIL_BACKEND_READY])
-	assert_false(backend.get_state()["detail"][CameraTracking.DETAIL_TRACKING_READY])
-	assert_false(backend.get_runtime_health()["process_active"])
+	assert_true(backend.get_state()["detail"][CameraTracking.DETAIL_TRACKING_READY])
+	assert_true(backend.get_runtime_health()["process_active"])
+	assert_true(backend.get_runtime_health()["tracking_active"])
 	assert_eq(backend.get_tracking_frame()["backend"], "mediapipe_python")
 	assert_eq(backend.get_tracking_frame()["tracking_state"], "tracked")
 	assert_eq(backend.get_tracking_frame()["frame_size"]["x"], 1280)
@@ -152,6 +162,12 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 	assert_eq(backend.get_preview_descriptor()["backend"], "mediapipe_python")
 	assert_eq(backend.list_cameras()[0]["camera_id"], "/dev/video0")
 	assert_eq(bridge.startup_configs[0]["runtime"]["entrypoint"], "python/main.py")
+
+	bridge.raw_tracking_frame["timestamp_ms"] = 456
+	bridge.raw_tracking_frame["tracking_state"] = "idle"
+	var refreshed := backend.get_tracking_frame()
+	assert_eq(int(refreshed["timestamp_ms"]), 456)
+	assert_eq(refreshed["tracking_state"], "idle")
 
 	backend.change({
 		"source": {"kind": "video_file", "path": "res://clips/demo.mp4"},

@@ -32,6 +32,7 @@ func get_vendor_runtime_config() -> Dictionary:
 	return _vendor_runtime_config.duplicate(true)
 
 func get_runtime_health() -> Dictionary:
+	_refresh_runtime_snapshot_if_running()
 	return _runtime_health.duplicate(true)
 
 func start(config: Dictionary) -> void:
@@ -92,21 +93,51 @@ func change(config: Dictionary) -> void:
 	_apply_runtime_snapshot(_bridge.reconfigure(_vendor_runtime_config), CameraTracking.STATE_RUNNING)
 
 func list_cameras() -> Array:
+	_refresh_runtime_snapshot_if_running()
 	if _bridge != null and _cameras.is_empty():
 		_cameras = MediaPipePythonCameraInventory.normalize(_bridge.list_cameras())
 	return _cameras.duplicate(true)
 
 func get_state() -> Dictionary:
+	_refresh_runtime_snapshot_if_running()
 	return {
 		"state": _state,
 		"detail": _detail.duplicate(true)
 	}
 
 func get_tracking_frame() -> Dictionary:
+	_refresh_runtime_snapshot_if_running()
 	return _tracking_frame.duplicate(true)
 
 func get_preview_descriptor() -> Dictionary:
+	_refresh_runtime_snapshot_if_running()
 	return _preview_descriptor.duplicate(true)
+
+func _refresh_runtime_snapshot_if_running() -> void:
+	if _bridge == null:
+		return
+	if _state != CameraTracking.STATE_RUNNING:
+		return
+	if not _bridge.has_method("poll_snapshot"):
+		return
+	var snapshot: Dictionary = _bridge.poll_snapshot()
+	if snapshot.is_empty():
+		return
+	if bool(snapshot.get("ok", false)) == false:
+		var error_info: Dictionary = snapshot.get("error_info", {
+			"code": "runtime_poll_failed",
+			"message": "MediaPipe Python runtime poll failed",
+			"backend": MediaPipePythonConfig.BACKEND_ID
+		})
+		_runtime_health = MediaPipePythonRuntimeHealth.errored(error_info, snapshot.get("health", {}))
+		_detail = _make_state_detail()
+		_state = CameraTracking.STATE_ERROR
+		return
+	_runtime_health = MediaPipePythonRuntimeHealth.make(snapshot.get("health", {}))
+	_cameras = MediaPipePythonCameraInventory.normalize(snapshot.get("cameras", []))
+	_tracking_frame = MediaPipePythonFrameMapper.map_raw_frame(snapshot.get("raw_tracking_frame", {}), _active_config)
+	_preview_descriptor = _make_preview_descriptor(snapshot.get("preview_descriptor", {}))
+	_detail = _make_state_detail()
 
 func _apply_runtime_snapshot(snapshot: Dictionary, success_state: String) -> void:
 	if bool(snapshot.get("ok", false)) == false:
