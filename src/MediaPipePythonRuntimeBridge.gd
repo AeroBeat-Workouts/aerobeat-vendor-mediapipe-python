@@ -199,18 +199,8 @@ func _write_request_payload(operation: String, vendor_config: Dictionary) -> Str
 func _build_command_spec(runtime: Dictionary, request_path: String) -> Dictionary:
 	var python_executable := str(runtime.get("python_executable", MediaPipePythonConfig.DEFAULT_PYTHON_EXECUTABLE))
 	var args: Array = [str(runtime.get("entrypoint", _resolve_entrypoint_path(""))), "--request-file", request_path]
-	var environment: Dictionary = runtime.get("environment", {})
 	var timeout_ms := int(runtime.get("boot_timeout_ms", MediaPipePythonConfig.DEFAULT_BOOT_TIMEOUT_MS))
 	var command := python_executable
-
-	if not environment.is_empty():
-		var env_args: Array = []
-		for key in environment.keys():
-			env_args.append("%s=%s" % [str(key), str(environment[key])])
-		env_args.append(command)
-		env_args.append_array(args)
-		command = "env"
-		args = env_args
 
 	if timeout_ms > 0:
 		args = [_format_timeout_seconds(timeout_ms), command] + args

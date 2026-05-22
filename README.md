@@ -2,7 +2,7 @@
 
 This repo hosts the first **vendor-owned MediaPipe Python backend/wrapper shell** for the AeroBeat camera-tracking lane.
 
-The current slice is intentionally a **truthful bootstrap/probe runtime lane**, not a full tracking delivery. It now launches a small repo-owned Python entrypoint for live-camera bootstrap/probe work, camera enumeration, and runtime-health snapshots without duplicating `aerobeat-tool-camera-tracking`'s public lifecycle contract. The shared camera-tracking singleton remains the owner of lifecycle semantics, preview attachment, and normalized public tracking payloads; this repo owns the vendor-specific startup/shutdown seam, config translation, truthful live-camera probe behavior, camera enumeration, runtime-health reporting, and raw-frame mapping needed to wire in a fuller MediaPipe Python process later.
+The current slice is intentionally a **truthful minimal sampled-frame runtime lane**, not a full tracking delivery. It now launches a small repo-owned Python entrypoint for live-camera bootstrap/probe work, camera enumeration, runtime-health snapshots, and capture of one truthful live-camera sample without duplicating `aerobeat-tool-camera-tracking`'s public lifecycle contract. The shared camera-tracking singleton remains the owner of lifecycle semantics, preview attachment, and normalized public tracking payloads; this repo owns the vendor-specific startup/shutdown seam, config translation, truthful live-camera probe behavior, camera enumeration, runtime-health reporting, and raw-frame mapping needed to wire in a fuller MediaPipe Python process later.
 
 ## Current bootstrap scope
 
@@ -17,7 +17,7 @@ The current slice is intentionally a **truthful bootstrap/probe runtime lane**, 
 
 - **Type:** AeroBeat vendor package
 - **License:** **Mozilla Public License 2.0 (MPL 2.0)**
-- **Implementation status:** truthful bootstrap/probe slice for live-camera startup, camera enumeration, and runtime-health reporting; full MediaPipe tracking inference is still deferred
+- **Implementation status:** truthful minimal sampled-frame slice for live-camera startup, camera enumeration, runtime-health reporting, and one non-empty raw sampled frame; full MediaPipe tracking inference is still deferred
 - **Primary contract dependency:** `aerobeat-tool-camera-tracking` at contract-shell commit `25f52da`
 
 ## GodotEnv development flow
@@ -66,6 +66,6 @@ godot --headless --path .testbed --script addons/gut/gut_cmdln.gd \
 
 ## Notes for later slices
 
-- a real long-lived Python subprocess/native tracking bridge still needs to be implemented behind `MediaPipePythonRuntimeBridge`; this slice only performs truthful bootstrap/probe work
+- a real long-lived Python subprocess/native tracking bridge still needs to be implemented behind `MediaPipePythonRuntimeBridge`; this slice only performs truthful startup/probe work plus one sampled-frame capture
 - public lifecycle semantics stay in `aerobeat-tool-camera-tracking`; this repo should not grow a competing singleton
 - preview attachment ownership and normalized top-level tracking payload remain upstream contract concerns even when vendor-specific raw payloads evolve here

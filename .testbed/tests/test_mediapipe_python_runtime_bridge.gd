@@ -25,7 +25,7 @@ func after_each() -> void:
 			dir.list_dir_end()
 		DirAccess.remove_absolute(_fixture_root)
 
-func test_startup_bootstraps_truthful_live_camera_probe_and_updates_health() -> void:
+func test_startup_captures_truthful_minimal_live_camera_sample_and_updates_health() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
 	var snapshot := bridge.startup(_make_runtime_config())
 
@@ -33,6 +33,14 @@ func test_startup_bootstraps_truthful_live_camera_probe_and_updates_health() -> 
 	assert_eq(snapshot["cameras"].size(), 2)
 	assert_eq(snapshot["cameras"][0]["camera_id"], _fixture_root.path_join("video0"))
 	assert_eq(snapshot["preview_descriptor"]["backend"], "mediapipe_python")
+	assert_eq(snapshot["raw_tracking_frame"]["source_kind"], "live_camera")
+	assert_eq(snapshot["raw_tracking_frame"]["source_id"], _fixture_root.path_join("video0"))
+	assert_eq(snapshot["raw_tracking_frame"]["tracking_state"], "idle")
+	assert_eq(int(snapshot["raw_tracking_frame"]["frame_size"]["x"]), 1280)
+	assert_eq(int(snapshot["raw_tracking_frame"]["frame_size"]["y"]), 720)
+	assert_true(int(snapshot["raw_tracking_frame"]["timestamp_ms"]) > 0)
+	assert_false(snapshot["raw_tracking_frame"].has("confidence"))
+	assert_false(snapshot["raw_tracking_frame"].has("landmarks"))
 	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_RUNNING)
 	assert_true(bridge.poll_health()["runtime_available"])
 	assert_true(bridge.poll_health()["camera_accessible"])
@@ -79,13 +87,30 @@ func test_startup_fails_honestly_when_requested_camera_is_missing() -> void:
 	assert_eq(snapshot["cameras"].size(), 2)
 	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_ERROR)
 
-func _make_runtime_config(overrides: Dictionary = {}) -> Dictionary:
+func test_startup_fails_honestly_when_camera_sample_cannot_be_captured() -> void:
+	var bridge = MediaPipePythonRuntimeBridge.new()
+	var snapshot := bridge.startup(_make_runtime_config({}, false))
+
+	assert_false(snapshot["ok"])
+	assert_eq(snapshot["error_info"]["code"], "camera_open_failed")
+	assert_eq(bridge.poll_health()["selected_camera_id"], _fixture_root.path_join("video0"))
+	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_ERROR)
+	assert_false(bridge.poll_health()["camera_accessible"])
+
+func _make_runtime_config(overrides: Dictionary = {}, include_sample_fixture: bool = true) -> Dictionary:
+	var environment := {
+		"AEROBEAT_CAMERA_ROOT": _fixture_root,
+		"AEROBEAT_CAMERA_PATTERN": "video*"
+	}
+	if include_sample_fixture:
+		environment["AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON"] = JSON.stringify({
+			_fixture_root.path_join("video0"): {"width": 1280, "height": 720, "timestamp_ms": 1710000000123},
+			_fixture_root.path_join("video2"): {"width": 640, "height": 480, "timestamp_ms": 1710000000456}
+		})
+
 	var config := MediaPipePythonConfig.make_vendor_runtime_config({
 		"runtime": {
-			"environment": {
-				"AEROBEAT_CAMERA_ROOT": _fixture_root,
-				"AEROBEAT_CAMERA_PATTERN": "video*"
-			}
+			"environment": environment
 		}
 	})
 	_deep_merge(config, overrides)
