@@ -140,9 +140,9 @@ Exact file layout is up to the coder as long as sharable owned source stays at t
 **Files Created/Deleted/Modified:**
 - none required unless a minimal QA artifact is needed
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** QA passed at the highest-fidelity repo-local level available. Exact validation run from the repo root: `godot --headless --path .testbed --import` (completed successfully; only emitted a non-fatal Godot `ObjectDB instances leaked at exit` warning after import), `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit` (10/10 tests passed, including all 4 new runtime-bridge tests), direct repo-root Python probe checks with `python3 runtime/mediapipe_runtime_probe.py --request-file ...` against fixture camera roots (truthfully returned enumerated cameras for `list_cameras`, rejected `source.kind=video_file` with `unsupported_source_kind`, and failed empty-camera startup with `no_live_cameras_found`), and a direct headless bridge smoke script via `godot --headless --path .testbed --script /tmp/avmp_bridge_smoke.gd` (startup succeeded, selected fixture `video0`, and reported `status=running`, `runtime_available=true`, `camera_accessible=true`, `process_active=false`). Ownership/boundary checks: `git diff --name-only HEAD~1..HEAD` showed only `README.md`, `runtime/mediapipe_runtime_probe.py`, `src/MediaPipePythonConfig.gd`, `src/MediaPipePythonRuntimeBridge.gd`, `.testbed/tests/test_mediapipe_python_runtime_bridge.gd`, and the plan file changed; `git diff --name-only HEAD~1..HEAD -- .testbed/addons .testbed/.addons` returned no changed addon-mirror files; `git diff --name-only HEAD~1..HEAD -- src/MediaPipePythonCameraTrackingBackend.gd` returned no backend-shell change, so public lifecycle ownership remains upstream. Gap noted for audit: QA did not verify a real physical camera device or full live MediaPipe inference because that is explicitly outside this slice; validation stayed within the truthful bootstrap/probe scope.
 
 ---
 
@@ -160,9 +160,9 @@ Exact file layout is up to the coder as long as sharable owned source stays at t
 **Files Created/Deleted/Modified:**
 - none required unless a minimal audit artifact becomes necessary
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** Independent audit passed for the planned slice. Exact audit evidence re-run from the repo root: `git diff --name-only HEAD~1..HEAD` showed only `README.md`, `runtime/mediapipe_runtime_probe.py`, `src/MediaPipePythonConfig.gd`, `src/MediaPipePythonRuntimeBridge.gd`, `.testbed/tests/test_mediapipe_python_runtime_bridge.gd`, and this plan changed; `git diff --name-only HEAD~1..HEAD -- .testbed/addons .testbed/.addons` returned no addon-mirror edits; `git diff --name-only HEAD~1..HEAD -- src/MediaPipePythonCameraTrackingBackend.gd` returned no contract-backend ownership drift. Source audit confirmed the bridge moved from a hardcoded `runtime_bridge_unimplemented` stub to a real narrow bridge that writes a request payload, launches repo-root Python entrypoint `runtime/mediapipe_runtime_probe.py`, parses structured JSON, records runtime health/error facts, enumerates cameras, and keeps `process_active=false`, `tracking_active=false`, and empty raw tracking payloads honest for this slice. Focused reruns passed: `godot --headless --path .testbed --import` (successful import; same non-fatal `ObjectDB instances leaked at exit` warning seen in QA), `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit` (10/10 tests passed), direct probe checks with fixture camera roots via `python3 runtime/mediapipe_runtime_probe.py --request-file ...` (truthfully returned two enumerated cameras for `list_cameras`, selected `video0` and reported `status=running runtime_available=true process_active=false tracking_active=false` for live-camera startup, and returned `unsupported_source_kind` for `video_file`), and direct headless bridge smoke via `godot --headless --path .testbed --script /tmp/avmp_audit_bridge_smoke.gd` (reported `startup_ok=true`, `camera_count=2`, `status=running`, `runtime_available=true`, `camera_accessible=true`, `process_active=false`, `tracking_active=false`). Audit conclusion: the runtime slice is truly complete for its planned narrow bootstrap/probe scope, ownership boundaries from `aerobeat-tool-camera-tracking` remain intact, no addon mirrors were treated as owned source, and validation evidence is sufficient and truthful.
 
 ---
 
@@ -178,14 +178,14 @@ This enforces the serialized coder → QA → auditor lane in the owning repo.
 
 ## Final Results
 
-**Status:** ⚠️ Partial — coder complete, QA/audit pending
+**Status:** ✅ Complete
 
-**What We Built:** Landed the first truthful repo-owned MediaPipe runtime slice: the bridge now launches a real Python bootstrap/probe entrypoint, reports runtime health, enumerates cameras, preserves the upstream lifecycle/normalized contract boundary, and fails unsupported source kinds honestly instead of hardcoding `runtime_bridge_unimplemented`.
+**What We Built:** Landed, QA-validated, and independently audited the first truthful repo-owned MediaPipe runtime slice: the bridge now launches a real Python bootstrap/probe entrypoint, reports runtime health, enumerates cameras, preserves the upstream lifecycle/normalized contract boundary, and fails unsupported source kinds honestly instead of hardcoding `runtime_bridge_unimplemented`.
 
-**Reference Check:** `REF-02`, `REF-03`, `REF-04`, `REF-07`, and `REF-08` are now satisfied by implementation rather than planning-only scaffolding. Ownership boundaries from `REF-05` and `REF-06` remain intact because the public lifecycle/normalized contract still flows through `MediaPipePythonCameraTrackingBackend` and upstream camera-tracking APIs.
+**Reference Check:** `REF-02`, `REF-03`, `REF-04`, `REF-07`, and `REF-08` are satisfied by the landed implementation plus rerun audit validation. Ownership boundaries from `REF-05` and `REF-06` remain intact because the public lifecycle/normalized contract still flows through `MediaPipePythonCameraTrackingBackend` and upstream camera-tracking APIs, with no addon-mirror edits in `.testbed/addons` or `.testbed/.addons`.
 
 **Commits:**
-- Pending coder commit for this slice.
+- `41a9abb` - Implement truthful Python bootstrap/probe bridge slice and repo-root runtime probe surface
 
 **Lessons Learned:**
 - The narrowest truthful runtime step was a short-lived Python bootstrap/probe lane, not premature long-lived tracking inference.
@@ -194,4 +194,4 @@ This enforces the serialized coder → QA → auditor lane in the owning repo.
 
 ---
 
-*Prepared on 2026-05-22*
+*Completed on 2026-05-22*

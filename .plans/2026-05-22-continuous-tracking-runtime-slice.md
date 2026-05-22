@@ -1,7 +1,7 @@
 # AeroBeat Vendor MediaPipe Python — Continuous Tracking Runtime Slice
 
 **Date:** 2026-05-22  
-**Status:** Draft  
+**Status:** Complete  
 **Agent:** Cookie 🍪
 
 ---
@@ -182,9 +182,40 @@ Scope stayed locked to vendor-owned runtime/session/inference/raw-update/health 
 **Files Created/Deleted/Modified:**
 - none required unless a minimal QA artifact becomes necessary
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** QA passed at the highest-fidelity repo-local level available on this host: repo-local Python + Godot validation plus a direct real `/dev/video0` continuous-session proof against the repo-owned Python runtime entrypoint.
+
+Exact validation commands/results from repo root:
+- `python3 -m py_compile runtime/mediapipe_runtime_probe.py` ✅
+- `python3 -m unittest runtime.tests.test_mediapipe_runtime_probe` ✅ (`Ran 5 tests in 0.001s`, `OK`)
+- `godot --headless --path .testbed --import` ✅ (completed successfully; preserved the existing non-fatal `ObjectDB instances leaked at exit` warning)
+- `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit` ✅ (`14/14` tests passed, `122` asserts)
+- `python3 runtime/mediapipe_runtime_probe.py --help` ✅ (confirmed the repo-owned session entrypoint/flags: `--request-file`, `--session-dir`)
+- `find . -maxdepth 3 \( -name 'pose_landmarker*.task' -o -name '*.task' \) -print && ls -l /dev/video*` ✅ (confirmed repo-owned model asset at `models/pose_landmarker_lite.task` and host live-camera nodes including `/dev/video0`)
+- direct host proof via inline Python harness launching `python3 runtime/mediapipe_runtime_probe.py --request-file <tmp>/request.json --session-dir <tmp-session>` against `/dev/video0` with repo-owned `models/pose_landmarker_lite.task` ✅
+
+Direct host proof details:
+- startup produced a readable live session snapshot with `health.status=running`, `process_active=true`, `tracking_active=true`, `camera_accessible=true`
+- first host snapshot carried only minimal raw frame keys: `frame_size`, `landmarks`, `source_id`, `source_kind`, `timestamp_ms`, `tracking_state`
+- first host landmark objects carried only `id`, `x`, `y`, `z`, `visibility`
+- a short 450 ms re-poll window caught an unchanged snapshot timestamp once, so QA widened the polling interval to 1.5 s and re-ran the host proof; that second run proved successive live updates without `reconfigure()`:
+  - first `timestamp_ms=1779470833675`
+  - second `timestamp_ms=1779470833675`
+  - third `timestamp_ms=1779470835514`
+  - fourth `timestamp_ms=1779470837078`
+  - `process_active=true` and `tracking_active=true` stayed truthful through the active snapshots
+- clean shutdown by writing the session `stop` file returned an honest inactive snapshot with `status=idle`, `process_active=false`, `tracking_active=false`, empty `raw_tracking_frame`, and process exit code `0`
+
+Failure-truth coverage confirmed during QA:
+- `runtime.tests.test_mediapipe_runtime_probe` still proves explicit missing-model truth (`mediapipe_model_missing`) plus unsupported-package truth
+- `.testbed/tests/test_mediapipe_python_runtime_bridge.gd` still proves explicit unsupported-source (`unsupported_source_kind`), missing-camera (`camera_not_found`), inference-failure (`mediapipe_inference_failed`), and camera-open failure truth
+- the GUT idle-frame test still proves `tracking_state=idle` can remain honest while `process_active=true` / `tracking_active=true` stay true for the live session
+
+Ownership / mirror check performed during QA:
+- `git diff-tree --no-commit-id --name-only -r 367660be2b3963cbbaa95be181945e638d182bfe` showed changes only in owned repo paths (`runtime/`, `src/`, `.testbed/tests/`, `README.md`, repo-local plan) and no `.testbed/addons/` or other addon mirror edits.
+
+Gap note: QA did not stage a real human no-pose host-camera scene on command; the no-pose-active-session truth was verified through the repo-local bridge test rather than a separate live-host manual scene setup.
 
 ---
 
@@ -202,9 +233,31 @@ Scope stayed locked to vendor-owned runtime/session/inference/raw-update/health 
 **Files Created/Deleted/Modified:**
 - none required unless a minimal audit artifact is necessary
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** Independent audit passed against the repo-local plan, commit `367660be2b3963cbbaa95be181945e638d182bfe`, the QA notes above, the owned-source diff, and focused rerun validation.
+
+Audit commands/results from repo root:
+- `bd update avmp-lgd --status in_progress --json` ✅ claimed auditor bead
+- `git status --short && git rev-parse HEAD && git show --stat --oneline --decorate --no-patch 367660be2b3963cbbaa95be181945e638d182bfe && git diff-tree --no-commit-id --name-only -r 367660be2b3963cbbaa95be181945e638d182bfe` ✅ confirmed the audited commit is `367660b` on `main`/`origin/main`, and changed paths stayed inside owned repo source/tests/docs/plan files only (`runtime/`, `src/`, `.testbed/tests/`, `README.md`, repo-local plan) with no `/addons` mirror edits
+- `python3 -m py_compile runtime/mediapipe_runtime_probe.py` ✅
+- `python3 -m unittest runtime.tests.test_mediapipe_runtime_probe` ✅ (`Ran 5 tests in 0.001s`, `OK`)
+- `godot --headless --path .testbed --import` ✅ (completed successfully; preserved the existing non-fatal `ObjectDB instances leaked at exit` warning)
+- `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit` ✅ (`14/14` tests passed, `122` asserts)
+- direct live-host auditor harness launching `python3 runtime/mediapipe_runtime_probe.py --request-file <tmp>/request.json --session-dir <tmp-session>` against `/dev/video0` with repo-owned `models/pose_landmarker_lite.task` ✅
+- focused bridge-side reconfigure audit via `godot --headless --path .testbed --script /tmp/avmp_reconfigure_audit.gd` ✅
+
+Independent audit findings:
+- `startup()` now launches a live runtime session, not a one-shot-only sample: direct host audit saw startup snapshot `health.status=running`, `process_active=true`, `tracking_active=true`, `camera_accessible=true` while the Python process remained alive.
+- `reconfigure()` also launches a fresh live session rather than falling back to one-shot semantics: the focused Godot audit harness proved `reconfigure_ok=true`, `reconfigure_process_active=true`, `reconfigure_tracking_active=true`, a new selected `source_id`, and advancing timestamps (`1779471118898 -> 1779471119200`) after `reconfigure()` without another restart.
+- Repeated raw updates are proven without `reconfigure()`: the direct host auditor harness observed timestamp series `1779471070749, 1779471070749, 1779471072734, 1779471072734, 1779471074465` while `process_active` and `tracking_active` stayed `true` throughout. Some polls legitimately repeated the same latest snapshot, but newer timestamps arrived from the same live session without reconfigure, which is the required temporal proof.
+- Active-session truth is proven: direct host snapshots kept `process_active=true` and `tracking_active=true` while the session lived; shutdown returned `status=idle`, `process_active=false`, `tracking_active=false`, empty `raw_tracking_frame`, and exit code `0`.
+- Idle no-pose honesty remains intact: the audited GUT bridge test still proves a live session can report `raw_tracking_frame.tracking_state=idle` with no landmarks while `process_active=true` / `tracking_active=true` remain truthful for the active loop.
+- Raw vendor payload shape remained minimal/truthful in direct host audit: top-level raw keys were exactly `frame_size`, `landmarks`, `source_id`, `source_kind`, `timestamp_ms`, `tracking_state`; landmark keys were exactly `id`, `visibility`, `x`, `y`, `z`.
+- Failure truth remained intact in audited validation: Python tests still prove missing-model / unsupported-package truth, and GUT tests still prove unsupported-source, missing-camera, camera-open-failure, and inference-failure truth.
+- Ownership stayed correct: the diff touched owned repo source/tests/docs/plan files only; no addon mirrors were treated as owned source.
+
+Auditor conclusion: the vendor continuous-tracking runtime slice is truly complete for its planned scope. Repeated updates and truthful active-session state are proven in audit.
 
 ---
 
@@ -218,16 +271,16 @@ Scope stayed locked to vendor-owned runtime/session/inference/raw-update/health 
 
 ## Final Results
 
-**Status:** ⚠️ Coder complete / pending QA + audit
+**Status:** ✅ Complete
 
 **What We Built:** The vendor repo now owns a truthful narrow continuous live-camera runtime lane instead of a one-shot sampled probe. Startup/reconfigure launches a repo-owned Python session that stays alive briefly, keeps producing repeated raw landmark frame updates, and reports honest runtime/session health while that session lives. The backend now refreshes from the live bridge snapshot so vendor-side getters can observe advancing raw updates and truthful active-session state.
 
-**Reference Check:** The coder slice satisfied the planned ownership split: this repo now owns runtime/session/inference/raw-frame-update/health truth, while public lifecycle/state/preview/source coordination and normalized frame semantics remain upstream in `aerobeat-tool-camera-tracking`.
+**Reference Check:** Audit confirmed the planned ownership split held: this repo now owns runtime/session/inference/raw-frame-update/health truth, while public lifecycle/state/preview/source coordination and normalized frame semantics remain upstream in `aerobeat-tool-camera-tracking`.
 
 **Commits:**
-- Pending coder commit.
+- `367660be2b3963cbbaa95be181945e638d182bfe` - Implement continuous MediaPipe runtime session lane
 
-**Lessons Learned:** The honest temporal step was not richer semantics; it was keeping the vendor runtime alive long enough to prove repeated raw updates and active-session truth without stealing public contract ownership from the tool repo.
+**Lessons Learned:** The honest temporal step was not richer semantics; it was keeping the vendor runtime alive long enough to prove repeated raw updates and active-session truth without stealing public contract ownership from the tool repo. Also, repeated polling can legitimately read the same latest snapshot more than once; the right audit question is whether newer timestamps arrive from the same live session without reconfigure, not whether every poll must advance.
 
 ---
 

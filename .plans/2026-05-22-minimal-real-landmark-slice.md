@@ -182,13 +182,44 @@ Updated repo-local tests in `.testbed/tests/test_mediapipe_python_runtime_bridge
 
 **Folders Created/Deleted/Modified:**
 - validation-only use of `/home/derrick/.openclaw/workspace/projects/aerobeat/aerobeat-vendor-mediapipe-python/.testbed/`
+- validation-only use of `/home/derrick/.openclaw/workspace/projects/aerobeat/aerobeat-vendor-mediapipe-python/.temp/qa-minimal-real-landmark/`
 
 **Files Created/Deleted/Modified:**
 - none required unless a minimal QA artifact becomes necessary
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** Independently QA-validated commit `aa0706752f2192caff6c06bccccf4674f22dda11` at the highest-fidelity repo-local level available. Verified via repo-local import/tests plus direct execution of `runtime/mediapipe_runtime_probe.py` that the sampled `startup` path can emit a non-empty raw landmark payload and that `reconfigure` stays honest/idle when the sampled frame contains no landmarks.
+
+Exact commands run:
+- `git status --short && echo '---' && git rev-parse HEAD && echo '---' && git log --oneline -n 5`
+- `git show --stat --oneline aa0706752f2192caff6c06bccccf4674f22dda11`
+- `find . -maxdepth 3 \( -path './addons' -o -path './*/addons' \) -print`
+- `godot --headless --path .testbed --import`
+- `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit`
+- direct `python3 runtime/mediapipe_runtime_probe.py --request-file ...` executions under `.temp/qa-minimal-real-landmark/` for fixture-backed success/idle cases plus controlled `PYTHONPATH` shim failures
+
+Observed results:
+- import smoke check passed (`exit 0`)
+- GUT suite passed (`13/13` tests, `104` asserts)
+- fixture-backed `startup` request returned `ok=true`, `raw_tracking_frame.tracking_state="tracked"`, and a `landmarks` array with only `id/x/y/z/visibility`
+- fixture-backed `reconfigure` request returned `ok=true`, `raw_tracking_frame.tracking_state="idle"`, and no `landmarks`
+- unsupported `video_file` request returned `ok=false` with `error_info.code="unsupported_source_kind"`
+- fake `mediapipe` import failure returned `ok=false` with `error_info.code="mediapipe_unavailable"`
+- fake `cv2.cvtColor` conversion failure returned `ok=false` with `error_info.code="mediapipe_inference_failed"`
+- fake MediaPipe `Pose.process()` exception returned `ok=false` with `error_info.code="mediapipe_inference_failed"`
+- no-fixture sample capture against a non-camera file returned `ok=false` with `error_info.code="camera_open_failed"`
+
+QA conclusions:
+- sampled `startup` now emits a raw landmark payload when the sampled frame yields landmarks
+- sampled `reconfigure` follows the same probe path and remains `idle` when the sample has no landmarks
+- `tracking_state` is only `"tracked"` when a non-empty landmark array exists; otherwise it is `"idle"`
+- emitted raw landmark entries are limited to `id`, `x`, `y`, `z`, and `visibility`
+- `confidence`, `skeleton`, `head_position`, `head_velocity`, and `head_orientation` remain absent in the vendor raw payload
+- runtime health truth remains intact: `process_active=false` and `tracking_active=false` on this sample-only slice even when landmarks are returned
+- commit diff touched repo-owned root files only (`runtime/`, `.testbed/tests/`, `README.md`, plan) and did not treat `.testbed/addons/` mirrors as owned source
+
+QA gap recorded honestly: this session did not validate against a physical live camera with the real installed MediaPipe package on-host; the strongest available repo-local proof here was fixture-backed runtime execution plus controlled `PYTHONPATH` shims for import/conversion/inference failure paths.
 
 ---
 
@@ -206,9 +237,13 @@ Updated repo-local tests in `.testbed/tests/test_mediapipe_python_runtime_bridge
 **Files Created/Deleted/Modified:**
 - none required unless a minimal audit artifact becomes necessary
 
-**Status:** ⏳ Pending
+**Status:** ❌ Failed
 
-**Results:** Pending.
+**Results:** Independent audit reran the repo-local test suite and focused runtime probes against commit `aa0706752f2192caff6c06bccccf4674f22dda11`. The slice **does** prove several important truths: fixture-backed sampled `startup` can return `raw_tracking_frame.tracking_state="tracked"` with landmark entries limited to `id/x/y/z/visibility`; fixture-backed `reconfigure` stays `"idle"` with no `landmarks`; repo-local GUT validation still passes (`13/13` tests, `104` asserts); missing MediaPipe import, OpenCV conversion failure, and MediaPipe inference exceptions all fail honestly with `mediapipe_unavailable` / `mediapipe_inference_failed`; `process_active=false` and `tracking_active=false` remain intact; and the landed diff stayed in repo-owned root files / `.testbed/tests/` without treating `.testbed/addons/` mirrors as owned source.
+
+However, the stricter planned-scope truth claim is **not yet fully proven complete**: on this host, the actual non-fixture live-camera runtime path does **not** currently produce a real raw landmark payload. A direct probe against `/dev/video0` with installed host packages captured a real frame but then failed honestly with `error_info.code="mediapipe_inference_failed"` because the installed `mediapipe` module exposes `Image`, `ImageFormat`, and `tasks` but has no `mediapipe.solutions` attribute, which the implementation currently requires. That means the slice presently proves fixture-backed raw-landmark transport plus honest failure behavior, but not a successful real MediaPipe landmark payload on the actual host runtime used for audit.
+
+Audit conclusion: keep `avmp-3r1` open / in progress. The implementation is close and the truth boundaries are mostly good, but the planned scope said this repo should reach the first truthful sampled live-camera landmark payload. Until the real installed runtime can successfully exercise the non-fixture MediaPipe inference path—or the plan is explicitly narrowed to fixture-only proof—the slice is not honestly complete for that scope.
 
 ---
 

@@ -1,7 +1,7 @@
 # AeroBeat Vendor MediaPipe Python — Host MediaPipe Compatibility Repair
 
 **Date:** 2026-05-22  
-**Status:** In Progress  
+**Status:** Complete  
 **Agent:** Cookie 🍪
 
 ---
@@ -148,9 +148,23 @@ QA can now verify the real host path directly on the installed tasks-era package
 **Files Created/Deleted/Modified:**
 - none required unless a minimal QA artifact is necessary
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** QA independently re-ran the repo-local validation stack and the direct host path on commit `32f08f5`.
+
+Exact commands/results:
+- `python3 -m unittest runtime.tests.test_mediapipe_runtime_probe` → passed (`Ran 5 tests in 0.001s`, `OK`)
+- `godot --headless --path .testbed --import` → exit 0
+- `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit` → passed (`13/13`)
+- direct host live-camera probe via `python3 runtime/mediapipe_runtime_probe.py --request-file <temp startup request for /dev/video0>` → `ok=true`, `selected_camera_id="/dev/video0"`, `raw_tracking_frame.tracking_state="tracked"`, `landmark_count=33`, `frame_size={"x":640,"y":480}`
+- raw payload shape check on that live response → `raw_tracking_frame` only exposed `frame_size`, `landmarks`, `source_id`, `source_kind`, `timestamp_ms`, and `tracking_state`; each landmark only exposed `id`, `x`, `y`, `z`, and `visibility`
+- failure-path spot check via Python import/mocks against `runtime/mediapipe_runtime_probe.py` → preserved honest codes: `mediapipe_model_missing`, `mediapipe_package_unsupported`, and `mediapipe_inference_failed`
+- source-ownership check via `git show --name-only --format='' 32f08f5` → changed files stayed in repo-owned paths; no `/addons` or `.testbed/addons` mirror paths were modified
+
+QA notes:
+- The real non-fixture host path succeeded on this machine using the tasks-era MediaPipe package shape and the repo-owned model asset at `models/pose_landmarker_lite.task`.
+- Legacy `mediapipe.solutions.pose` support was not directly runnable on this host package shape, but repo-local unit coverage still exercises and passes that compatibility branch.
+- The live probe emitted some stderr noise from V4L2 / TensorFlow Lite (`ioctl(VIDIOC_QBUF): Bad file descriptor` and MediaPipe warnings), but the probe still returned a truthful success payload with `health.last_error={}`. No QA evidence showed the warnings corrupting payload truth.
 
 ---
 
@@ -168,9 +182,26 @@ QA can now verify the real host path directly on the installed tasks-era package
 **Files Created/Deleted/Modified:**
 - none required unless a minimal audit artifact is necessary
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** Audit independently re-ran the critical proof on commit `32f08f5` and found the planned slice complete for its stated scope.
+
+Exact commands/results:
+- `python3 - <<'PY' ... import mediapipe as mp ... PY` → host package confirmed as `{'version': '0.10.32', 'has_solutions': False, 'has_tasks': True, 'has_Image': True, 'has_ImageFormat': True}`
+- `python3 -m unittest runtime.tests.test_mediapipe_runtime_probe` → passed (`Ran 5 tests in 0.001s`, `OK`)
+- `godot --headless --path .testbed --import` → exit 0 (editor import completed; only a non-failing ObjectDB leak warning at exit)
+- `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit` → passed (`13/13`, `105` asserts)
+- direct host live-camera probe via `python3 runtime/mediapipe_runtime_probe.py --request-file <temp startup request for /dev/video0>` → `ok=true`, `selected_camera_id="/dev/video0"`, `health.last_error={}`, `raw_tracking_frame.tracking_state="tracked"`, `landmark_count=33`, `frame_size={"x":640,"y":480}`
+- raw payload shape check on that live response → `raw_tracking_frame` only exposed `frame_size`, `landmarks`, `source_id`, `source_kind`, `timestamp_ms`, and `tracking_state`; first landmark only exposed `id`, `x`, `y`, `z`, and `visibility`
+- focused failure-path spot check via Python import/mocks against `runtime/mediapipe_runtime_probe.py` → preserved honest codes `{missing_model: mediapipe_model_missing, inference_failure: mediapipe_inference_failed, unsupported_package: mediapipe_package_unsupported}`
+- source-ownership check via `git show --name-only --format='' 32f08f5` → changed files stayed in repo-owned paths; no `/addons` or `.testbed/addons` mirror paths were modified
+
+Audit notes:
+- The real non-fixture host path does succeed on this machine now, and it is succeeding through the tasks-era MediaPipe branch, not a fixture shortcut.
+- The repo-owned model asset actually used in the live probe was `/home/derrick/.openclaw/workspace/projects/aerobeat/aerobeat-vendor-mediapipe-python/models/pose_landmarker_lite.task`.
+- The live probe still emits V4L2 / TensorFlow Lite stderr warnings (`ioctl(VIDIOC_QBUF): Bad file descriptor` plus MediaPipe/TFLite warnings), but they did not flip the response into a false success: the returned payload stayed truthful and `health.last_error` remained empty.
+- Legacy `mediapipe.solutions.pose` support is not runnable on this installed host package shape, but unit coverage still exercises that compatibility branch and passed.
+- No evidence showed contract drift, payload bloat, dishonest failure masking, or work being landed into consumer/addon mirrors.
 
 ---
 
@@ -184,16 +215,16 @@ QA can now verify the real host path directly on the installed tasks-era package
 
 ## Final Results
 
-**Status:** ⚠️ Coder complete / QA ready
+**Status:** ✅ Complete
 
-**What We Built:** The coder pass implemented the repo-local host-compatibility repair needed to make the vendor runtime work with the actual installed MediaPipe package shape on this machine. The runtime now supports both the legacy `mediapipe.solutions.pose.Pose(...)` path and the installed tasks-era `mediapipe.tasks` + `PoseLandmarker` path, with a repo-owned default pose-landmarker model asset and explicit missing-model / unsupported-package truth.
+**What We Built:** The vendor runtime repair now has independent audit proof on this machine, not just coder and QA claims. Repo-local validation still passes, the real non-fixture host live-camera path succeeds against the installed tasks-era MediaPipe package shape, and the repo-owned model asset at `models/pose_landmarker_lite.task` is actually sufficient for the sampled pose-landmarker path.
 
-**Reference Check:** `REF-03`, `REF-05`, `REF-06`, and `REF-07` were satisfied in the coder pass. The runtime no longer assumes `mediapipe.solutions` on this tasks-only host package, and the direct non-fixture host probe now returns a real sampled landmark payload while keeping the raw payload minimal (`id/x/y/z/visibility` only) and preserving explicit failure semantics for missing model / unsupported package / inference failures.
+**Reference Check:** `REF-03`, `REF-05`, `REF-06`, and `REF-07` are satisfied in the completed audit. The runtime no longer assumes `mediapipe.solutions` on this tasks-only host package, the direct host probe returned `ok=true` with `tracking_state="tracked"` and `33` raw landmarks, the raw payload stayed minimal (`raw_tracking_frame` only `frame_size`, `landmarks`, `source_id`, `source_kind`, `timestamp_ms`, `tracking_state`; landmarks only `id/x/y/z/visibility`), honest failure semantics remained explicit for missing model / unsupported package / inference failure, and no `/addons` mirror paths were treated as owned source.
 
 **Commits:**
-- Pending coder commit/push.
+- `32f08f5` - Support tasks-era MediaPipe host landmarks
 
-**Lessons Learned:** The blocker really was the package-shape seam plus the missing explicit `.task` model asset. Once the vendor runtime learned the host’s tasks-era API honestly, the real host camera path could be proved without broadening into downstream contract churn.
+**Lessons Learned:** For this slice, QA and audit both needed the same hard proof: unit coverage to preserve legacy/failure semantics plus a real host `/dev/video0` run to confirm the tasks-era compatibility branch works on the actual installed package rather than only in fixtures or mocks.
 
 ---
 
