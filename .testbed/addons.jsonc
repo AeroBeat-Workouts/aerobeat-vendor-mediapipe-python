@@ -1,8 +1,14 @@
 {
   "$schema": "https://chickensoft.games/schemas/addons.schema.json",
   "addons": {
-    // Tool-template bootstrap pins the shared tool/workflow contract.
-    // `main` is intentional until aerobeat-tool-core starts tagging releases.
+    // Camera-tracking contract shell under test for backend compatibility.
+    "aerobeat-tool-camera-tracking": {
+      "url": "git@github.com:AeroBeat-Workouts/aerobeat-tool-camera-tracking.git",
+      "checkout": "25f52da",
+      "subfolder": "/"
+    },
+    // Shared tool/workflow contract pinned for repo-local proving surfaces.
+    // `main` remains intentional until aerobeat-tool-core starts tagging releases.
     "aerobeat-tool-core": {
       "url": "git@github.com:AeroBeat-Workouts/aerobeat-tool-core.git",
       "checkout": "main",
