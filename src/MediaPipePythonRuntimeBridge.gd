@@ -1,5 +1,7 @@
 extends RefCounted
 
+const MediaPipePythonRuntimeHealth = preload("MediaPipePythonRuntimeHealth.gd")
+
 func startup(_vendor_config: Dictionary) -> Dictionary:
 	return {
 		"ok": false,

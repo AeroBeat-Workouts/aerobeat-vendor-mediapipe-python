@@ -1,5 +1,7 @@
 extends RefCounted
 
+const MediaPipePythonConfig = preload("MediaPipePythonConfig.gd")
+
 static func normalize(raw_cameras: Array, backend: String = MediaPipePythonConfig.BACKEND_ID) -> Array:
 	var normalized: Array = []
 	for raw_camera in raw_cameras:

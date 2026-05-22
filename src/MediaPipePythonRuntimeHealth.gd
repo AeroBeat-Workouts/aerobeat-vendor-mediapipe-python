@@ -1,5 +1,7 @@
 extends RefCounted
 
+const MediaPipePythonConfig = preload("MediaPipePythonConfig.gd")
+
 const STATUS_IDLE := "idle"
 const STATUS_STARTING := "starting"
 const STATUS_RUNNING := "running"

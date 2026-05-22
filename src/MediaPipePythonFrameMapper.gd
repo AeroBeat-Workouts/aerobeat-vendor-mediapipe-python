@@ -1,6 +1,7 @@
 extends RefCounted
 
 const CameraTrackingFrame = preload("res://addons/aerobeat-tool-camera-tracking/src/CameraTrackingFrame.gd")
+const MediaPipePythonConfig = preload("MediaPipePythonConfig.gd")
 
 static func empty(config: Dictionary = {}) -> Dictionary:
 	var frame := CameraTrackingFrame.empty(MediaPipePythonConfig.normalize_public_config(config))
