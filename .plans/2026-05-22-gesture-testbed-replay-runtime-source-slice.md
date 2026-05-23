@@ -76,7 +76,7 @@ This plan starts after the live-only wave is green enough to avoid mixing live a
 
 **Status:** ✅ Complete
 
-**Results:** Implemented the narrowest honest vendor-owned replay slice in repo-root source. `src/MediaPipePythonRuntimeBridge.gd` now accepts `source.kind = video_file`, resolves `source.path` into a real filesystem path, and fails early with truthful `video_file_path_missing` / `video_file_missing` errors instead of routing replay through live-camera semantics. `runtime/mediapipe_runtime_probe.py` now treats replay as a first-class vendor source: one-shot replay sampling returns `source_kind = video_file` + `source_id = <video path>`, continuous replay sessions emit successive raw frame updates while frames remain, and EOF now ends the runtime cleanly with `status = idle`, `process_active = false`, `tracking_active = false` instead of surfacing a fake runtime crash. Repo-local validation was expanded in both Python and Godot test surfaces to prove replay startup/update/EOF/failure truth without broadening into tool-owned public schema work or input-owned compatibility seams.
+**Results:** Implemented the narrowest honest vendor-owned replay slice in repo-root source. `src/MediaPipePythonRuntimeBridge.gd` now accepts `source.kind = video_file`, resolves `source.path` into a real filesystem path, and fails early with truthful `video_file_path_missing` / `video_file_missing` errors instead of routing replay through live-camera semantics. `runtime/mediapipe_runtime_probe.py` now treats replay as a first-class vendor source: one-shot replay sampling returns `source_kind = video_file` + `source_id = <video path>`, continuous replay sessions emit successive raw frame updates while frames remain, and EOF now ends the runtime cleanly with `status = idle`, `process_active = false`, `tracking_active = false` instead of surfacing a fake runtime crash. Repo-local validation was expanded in both Python and Godot test surfaces to prove replay startup/update/EOF/failure truth without broadening into tool-owned public schema work or input-owned compatibility seams. Direct fixture-backed probe proof also returned `ok = true`, `selected_camera_id = <video path>`, `source_kind = video_file`, `source_id = <video path>`, `tracking_state = tracked`, and `frame_size = {x: 640, y: 360}`. Coder handoff commit: `61de6d8` (`Add truthful replay runtime source support`). Bead `avmp-224` was then closed as ready for QA.
 
 ---
 
@@ -139,7 +139,7 @@ Cross-repo coordination note: this replay vendor slice should begin after the li
 **Reference Check:** `REF-04` and `REF-06` are now satisfied for the planned replay/runtime source scope. `REF-03`’s replay expectations are covered only at the vendor boundary for now; tool-owned public replay service semantics and downstream adapter/session compatibility remain for later QA/audit and follow-up slices.
 
 **Commits:**
-- Pending coder commit.
+- `61de6d8` - `Add truthful replay runtime source support`
 
 **Lessons Learned:** The replay blocker really was vendor-owned runtime/source behavior. Once the bridge and probe handle `video_file` truthfully, the remaining work cleanly stays in tool/input-owned layers instead of forcing vendor code to impersonate them.
 
