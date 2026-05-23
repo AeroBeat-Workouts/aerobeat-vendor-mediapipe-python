@@ -46,12 +46,22 @@ class FakeRuntimeBridge extends "res://../src/MediaPipePythonRuntimeBridge.gd":
 
 	func startup(vendor_config: Dictionary) -> Dictionary:
 		startup_configs.append(vendor_config.duplicate(true))
+		var snapshot_frame := raw_tracking_frame.duplicate(true)
+		var source: Dictionary = vendor_config.get("source", {})
+		var source_kind := str(source.get("kind", "live_camera"))
+		if source_kind == "video_file":
+			snapshot_frame["source_kind"] = "video_file"
+			snapshot_frame["source_id"] = str(source.get("path", ""))
+		else:
+			snapshot_frame["source_kind"] = "live_camera"
+			snapshot_frame["source_id"] = str(source.get("camera_id", snapshot_frame.get("source_id", "/dev/video0")))
+		raw_tracking_frame = snapshot_frame.duplicate(true)
 		return {
 			"ok": true,
 			"health": health.duplicate(true),
 			"cameras": cameras.duplicate(true),
 			"preview_descriptor": preview_descriptor.duplicate(true),
-			"raw_tracking_frame": raw_tracking_frame.duplicate(true)
+			"raw_tracking_frame": snapshot_frame
 		}
 
 	func shutdown() -> Dictionary:
@@ -175,7 +185,8 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 	})
 	assert_eq(backend.get_state()["state"], CameraTracking.STATE_RUNNING)
 	assert_eq(bridge.startup_configs.size(), 2)
-	assert_eq(backend.get_tracking_frame()["source_kind"], "live_camera")
+	assert_eq(backend.get_tracking_frame()["source_kind"], "video_file")
+	assert_eq(backend.get_tracking_frame()["source_id"], "res://clips/demo.mp4")
 
 	backend.stop()
 	assert_eq(backend.get_state()["state"], CameraTracking.STATE_IDLE)

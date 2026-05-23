@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import tempfile
 import types
@@ -177,6 +178,81 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             result = probe._infer_pose_landmarks_with_mediapipe(runtime, frame_bgr=[[0]])
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_info"]["code"], "mediapipe_package_unsupported")
+
+    def test_video_file_sample_uses_fixture_sequence_with_truthful_source_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "fixture.mp4"
+            video_path.write_bytes(b"fixture-video")
+            runtime = {
+                "working_directory": temp_dir,
+                "environment": {
+                    "AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": json.dumps({
+                        str(video_path): {
+                            "sequence": [
+                                {"width": 960, "height": 540, "timestamp_ms": 101, "landmarks": [{"id": 4, "x": 0.2, "y": 0.3, "z": -0.1, "visibility": 0.9}]},
+                                {"width": 960, "height": 540, "timestamp_ms": 202}
+                            ]
+                        }
+                    })
+                }
+            }
+            request = {
+                "operation": "startup",
+                "runtime": runtime,
+                "source": {"kind": "video_file", "path": str(video_path)},
+                "preview": {"enabled": True},
+            }
+            first = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+            self.assertTrue(first["ok"])
+            self.assertEqual(first["selected_camera_id"], str(video_path))
+            self.assertEqual(first["raw_tracking_frame"]["source_kind"], "video_file")
+            self.assertEqual(first["raw_tracking_frame"]["source_id"], str(video_path))
+            self.assertEqual(first["raw_tracking_frame"]["tracking_state"], "tracked")
+            self.assertEqual(first["raw_tracking_frame"]["frame_size"], {"x": 960, "y": 540})
+            self.assertEqual(first["raw_tracking_frame"]["landmarks"][0]["id"], 4)
+
+            second = probe._sample_once(request, sample_index=1, dynamic_timestamp=False)
+            self.assertTrue(second["ok"])
+            self.assertEqual(second["raw_tracking_frame"]["tracking_state"], "idle")
+            self.assertEqual(second["raw_tracking_frame"]["source_kind"], "video_file")
+            self.assertFalse("landmarks" in second["raw_tracking_frame"])
+
+    def test_run_continuous_video_file_session_writes_idle_snapshot_after_fixture_eof(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "fixture.mp4"
+            video_path.write_bytes(b"fixture-video")
+            session_dir = Path(temp_dir) / "session"
+            request = {
+                "operation": "startup",
+                "runtime": {
+                    "working_directory": temp_dir,
+                    "health_poll_interval_ms": 30,
+                    "environment": {
+                        "AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": json.dumps({
+                            str(video_path): {
+                                "sequence": [
+                                    {"width": 640, "height": 360, "timestamp_ms": 10},
+                                    {"width": 640, "height": 360, "timestamp_ms": 20}
+                                ]
+                            }
+                        })
+                    }
+                },
+                "source": {"kind": "video_file", "path": str(video_path)},
+                "preview": {"enabled": True},
+            }
+            with mock.patch.object(probe.time, "sleep", return_value=None):
+                exit_code = probe._run_continuous_session(request, str(session_dir))
+            self.assertEqual(exit_code, 0)
+            snapshot_path = session_dir / "runtime_snapshot.json"
+            self.assertTrue(snapshot_path.exists())
+            snapshot = json.loads(snapshot_path.read_text())
+            self.assertTrue(snapshot["ok"])
+            self.assertEqual(snapshot["selected_camera_id"], str(video_path))
+            self.assertEqual(snapshot["health"]["status"], "idle")
+            self.assertFalse(snapshot["health"]["process_active"])
+            self.assertFalse(snapshot["health"]["tracking_active"])
+            self.assertEqual(snapshot["raw_tracking_frame"], {})
 
 
 if __name__ == "__main__":

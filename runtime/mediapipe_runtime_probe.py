@@ -99,7 +99,7 @@ def _base_health(operation: str, runtime: Dict[str, Any]) -> Dict[str, Any]:
         "healthy": operation == "list_cameras",
         "last_error": {},
         "notes": [
-            "Runtime now supports a short-lived truthful continuous live-camera loop for repeated raw frame updates; broader public temporal semantics remain upstream-owned."
+            "Runtime now supports truthful continuous live-camera and replay/video-file raw frame updates; broader public temporal semantics remain upstream-owned."
         ],
         "probe_operation": operation,
         "python_executable": sys.executable,
@@ -131,21 +131,21 @@ def _normalize_fixture_landmark(camera_id: str, landmark: Any, index: int) -> Di
     }
 
 
-def _raw_tracking_frame_base(camera_id: str, width: int, height: int, timestamp_ms: int) -> Dict[str, Any]:
+def _raw_tracking_frame_base(source_kind: str, source_id: str, width: int, height: int, timestamp_ms: int) -> Dict[str, Any]:
     return {
         "timestamp_ms": timestamp_ms,
-        "source_kind": "live_camera",
-        "source_id": camera_id,
+        "source_kind": source_kind,
+        "source_id": source_id,
         "tracking_state": "idle",
         "frame_size": {"x": width, "y": height},
     }
 
 
-def _normalize_fixture_sample(camera_id: str, fixture: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
+def _normalize_fixture_sample(source_id: str, fixture: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False, source_kind: str = "live_camera") -> Dict[str, Any]:
     width = int(fixture.get("width", 0))
     height = int(fixture.get("height", 0))
     if width <= 0 or height <= 0:
-        raise ValueError(f"Camera sample fixture for '{camera_id}' must provide positive width/height")
+        raise ValueError(f"Camera sample fixture for '{source_id}' must provide positive width/height")
 
     timestamp_ms = int(fixture.get("timestamp_ms", _now_ms()))
     if dynamic_timestamp:
@@ -154,31 +154,31 @@ def _normalize_fixture_sample(camera_id: str, fixture: Dict[str, Any], sample_in
         else:
             timestamp_ms = _now_ms()
 
-    raw_tracking_frame = _raw_tracking_frame_base(camera_id, width, height, timestamp_ms)
-    notes = [f"Captured sample frame for '{camera_id}' via configured fixture dimensions {width}x{height}."]
+    raw_tracking_frame = _raw_tracking_frame_base(source_kind, source_id, width, height, timestamp_ms)
+    notes = [f"Captured sample frame for '{source_id}' via configured fixture dimensions {width}x{height}."]
 
     if fixture.get("inference_error") is not None:
         error_info = fixture.get("inference_error")
         if not isinstance(error_info, dict):
-            raise ValueError(f"Camera sample fixture for '{camera_id}' inference_error must be an object")
+            raise ValueError(f"Camera sample fixture for '{source_id}' inference_error must be an object")
         return {
             "raw_tracking_frame": raw_tracking_frame,
             "fixture_inference_error": {
                 "code": str(error_info.get("code", "mediapipe_inference_failed")),
-                "message": str(error_info.get("message", f"Fixture inference failed for '{camera_id}'")),
+                "message": str(error_info.get("message", f"Fixture inference failed for '{source_id}'")),
             },
             "notes": notes,
         }
 
     landmarks_raw = fixture.get("landmarks")
     if isinstance(landmarks_raw, list):
-        landmarks = [_normalize_fixture_landmark(camera_id, landmark, index) for index, landmark in enumerate(landmarks_raw)]
+        landmarks = [_normalize_fixture_landmark(source_id, landmark, index) for index, landmark in enumerate(landmarks_raw)]
         if landmarks:
             raw_tracking_frame["tracking_state"] = "tracked"
             raw_tracking_frame["landmarks"] = landmarks
-            notes.append(f"Fixture supplied {len(landmarks)} pose landmark(s) for '{camera_id}'.")
+            notes.append(f"Fixture supplied {len(landmarks)} pose landmark(s) for '{source_id}'.")
         else:
-            notes.append(f"Fixture supplied an empty landmark array for '{camera_id}'; tracking remains idle.")
+            notes.append(f"Fixture supplied an empty landmark array for '{source_id}'; tracking remains idle.")
 
     return {
         "raw_tracking_frame": raw_tracking_frame,
@@ -187,20 +187,24 @@ def _normalize_fixture_sample(camera_id: str, fixture: Dict[str, Any], sample_in
     }
 
 
-def _sample_from_fixture(camera_id: str, runtime: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Optional[Dict[str, Any]]:
+def _sample_from_fixture(source_id: str, runtime: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False, source_kind: str = "live_camera") -> Optional[Dict[str, Any]]:
     fixtures = _sample_fixture_map(runtime)
-    fixture = fixtures.get(camera_id)
+    fixture = fixtures.get(source_id)
     if not isinstance(fixture, dict):
         return None
 
     sequence = fixture.get("sequence")
-    if isinstance(sequence, list) and sequence:
-        chosen = sequence[min(sample_index, len(sequence) - 1)]
+    if isinstance(sequence, list):
+        if not sequence:
+            return None
+        if sample_index >= len(sequence):
+            return {"fixture_eof": True}
+        chosen = sequence[sample_index]
         if not isinstance(chosen, dict):
-            raise ValueError(f"Camera sample fixture sequence for '{camera_id}' must contain objects")
-        return _normalize_fixture_sample(camera_id, chosen, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
+            raise ValueError(f"Camera sample fixture sequence for '{source_id}' must contain objects")
+        return _normalize_fixture_sample(source_id, chosen, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp, source_kind=source_kind)
 
-    return _normalize_fixture_sample(camera_id, fixture, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
+    return _normalize_fixture_sample(source_id, fixture, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp, source_kind=source_kind)
 
 
 def _camera_device_index(camera_id: str) -> Optional[int]:
@@ -271,7 +275,7 @@ def _capture_frame_with_opencv_source(cv2: Any, camera_id: str, capture_source: 
         return {
             "ok": True,
             "frame_bgr": frame,
-            "raw_tracking_frame": _raw_tracking_frame_base(camera_id, width, height, timestamp_ms),
+            "raw_tracking_frame": _raw_tracking_frame_base("live_camera", camera_id, width, height, timestamp_ms),
             "notes": [note],
         }
     finally:
@@ -279,8 +283,16 @@ def _capture_frame_with_opencv_source(cv2: Any, camera_id: str, capture_source: 
 
 
 def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
-    fixture_sample = _sample_from_fixture(camera_id, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
+    fixture_sample = _sample_from_fixture(camera_id, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp, source_kind="live_camera")
     if fixture_sample is not None:
+        if fixture_sample.get("fixture_eof"):
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "fixture_sequence_exhausted",
+                    "message": f"Fixture sequence exhausted for live camera '{camera_id}'",
+                },
+            }
         return {"ok": True, **fixture_sample}
 
     try:
@@ -313,6 +325,244 @@ def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any], sample_
         last_failure = result
 
     return last_failure
+
+
+def _capture_video_file_sample(video_path: str, runtime: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
+    fixture_sample = _sample_from_fixture(video_path, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp, source_kind="video_file")
+    if fixture_sample is not None:
+        if fixture_sample.get("fixture_eof"):
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "video_file_eof",
+                    "message": f"Replay video '{video_path}' reached EOF before producing another frame",
+                },
+            }
+        return {"ok": True, **fixture_sample}
+
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "opencv_unavailable",
+                "message": f"OpenCV import failed while sampling replay video '{video_path}': {exc}",
+            },
+        }
+
+    result = _capture_frame_with_opencv_source(cv2, video_path, video_path, "video file")
+    if not bool(result.get("ok", False)):
+        error_info = result.get("error_info", {
+            "code": "video_file_read_failed",
+            "message": f"Failed to read replay video '{video_path}'",
+        })
+        if error_info.get("code") == "camera_open_failed":
+            error_info = {
+                "code": "video_file_open_failed",
+                "message": f"OpenCV could not open replay video '{video_path}' for sample capture",
+            }
+        elif error_info.get("code") == "camera_read_failed":
+            error_info = {
+                "code": "video_file_read_failed",
+                "message": f"OpenCV could not read a frame from replay video '{video_path}'",
+            }
+        return {"ok": False, "error_info": error_info}
+
+    raw_tracking_frame = result.get("raw_tracking_frame", {}).copy()
+    raw_tracking_frame["source_kind"] = "video_file"
+    raw_tracking_frame["source_id"] = video_path
+    return {
+        "ok": True,
+        "frame_bgr": result.get("frame_bgr"),
+        "raw_tracking_frame": raw_tracking_frame,
+        "notes": [f"Captured one replay frame from '{video_path}' via video file source."],
+    }
+
+
+def _replay_eof_snapshot(request: Dict[str, Any], selected_source_id: str, loop_started_ms: int, sample_index: int, notes: Optional[List[str]] = None) -> Dict[str, Any]:
+    runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
+    base_notes = list(notes or [])
+    base_notes.append(f"Replay source '{selected_source_id}' reached EOF and stopped cleanly.")
+    return {
+        "ok": True,
+        "cameras": _enumerate_cameras(runtime),
+        "selected_camera_id": selected_source_id,
+        "health": {
+            **_base_health("startup", runtime),
+            "status": "idle",
+            "runtime_available": True,
+            "bridge_connected": True,
+            "process_active": False,
+            "camera_accessible": True,
+            "tracking_active": False,
+            "healthy": True,
+            "loop_iteration": sample_index,
+            "loop_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(loop_started_ms / 1000.0)),
+            "probed_at": _now_iso(),
+            "selected_camera_id": selected_source_id,
+            "notes": base_notes,
+        },
+        "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+        "raw_tracking_frame": {},
+    }
+
+
+def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
+    os.makedirs(session_dir, exist_ok=True)
+    _write_json_atomic(_session_request_path(session_dir), request)
+    runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
+    source = request.get("source", {}) if isinstance(request.get("source", {}), dict) else {}
+    video_path = str(source.get("path", "")).strip()
+    interval_ms = max(30, int(runtime.get("health_poll_interval_ms", 250)))
+    loop_started_ms = _now_ms()
+    sample_index = 0
+    fixture_map = _sample_fixture_map(runtime)
+    use_fixture_sequence = isinstance(fixture_map.get(video_path), dict)
+
+    capture = None
+    cv2 = None
+    if not use_fixture_sequence:
+        try:
+            import cv2 as _cv2  # type: ignore
+            cv2 = _cv2
+        except Exception as exc:
+            snapshot = _continuous_error_snapshot(request, {
+                "error_info": {
+                    "code": "opencv_unavailable",
+                    "message": f"OpenCV import failed while opening replay video '{video_path}': {exc}",
+                },
+                "selected_camera_id": video_path,
+            }, sample_index, loop_started_ms)
+            _write_session_snapshot(session_dir, snapshot)
+            return 1
+        capture = cv2.VideoCapture(video_path)
+        if not capture.isOpened():
+            snapshot = _continuous_error_snapshot(request, {
+                "error_info": {
+                    "code": "video_file_open_failed",
+                    "message": f"OpenCV could not open replay video '{video_path}'",
+                },
+                "selected_camera_id": video_path,
+            }, sample_index, loop_started_ms)
+            _write_session_snapshot(session_dir, snapshot)
+            return 1
+
+    try:
+        while True:
+            if os.path.exists(_session_stop_path(session_dir)):
+                shutdown_snapshot = {
+                    "ok": True,
+                    "cameras": _enumerate_cameras(runtime),
+                    "selected_camera_id": video_path,
+                    "health": {
+                        **_base_health("shutdown", runtime),
+                        "status": "idle",
+                        "runtime_available": True,
+                        "bridge_connected": True,
+                        "process_active": False,
+                        "camera_accessible": True,
+                        "tracking_active": False,
+                        "healthy": True,
+                        "selected_camera_id": video_path,
+                        "notes": [f"Replay session for '{video_path}' stopped cleanly."],
+                    },
+                    "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+                    "raw_tracking_frame": {},
+                }
+                _write_session_snapshot(session_dir, shutdown_snapshot)
+                return 0
+
+            if use_fixture_sequence:
+                sampled = _capture_video_file_sample(video_path, runtime, sample_index=sample_index, dynamic_timestamp=True)
+                if not bool(sampled.get("ok", False)) and sampled.get("error_info", {}).get("code") == "video_file_eof":
+                    _write_session_snapshot(session_dir, _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index))
+                    return 0
+            else:
+                assert capture is not None
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    _write_session_snapshot(session_dir, _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index))
+                    return 0
+                shape = getattr(frame, "shape", None)
+                if shape is None or len(shape) < 2:
+                    snapshot = _continuous_error_snapshot(request, {
+                        "error_info": {
+                            "code": "video_file_frame_invalid",
+                            "message": f"OpenCV returned an invalid replay frame shape for '{video_path}'",
+                        },
+                        "selected_camera_id": video_path,
+                    }, sample_index, loop_started_ms)
+                    _write_session_snapshot(session_dir, snapshot)
+                    return 1
+                height = int(shape[0])
+                width = int(shape[1])
+                sampled = {
+                    "ok": True,
+                    "frame_bgr": frame,
+                    "raw_tracking_frame": _raw_tracking_frame_base("video_file", video_path, width, height, _now_ms()),
+                    "notes": [f"Captured replay frame {sample_index} from '{video_path}'."],
+                }
+
+            if not bool(sampled.get("ok", False)):
+                snapshot = _continuous_error_snapshot(request, {
+                    **sampled,
+                    "selected_camera_id": video_path,
+                }, sample_index, loop_started_ms)
+                _write_session_snapshot(session_dir, snapshot)
+                return 1
+
+            inferred = _infer_pose_landmarks(sampled, runtime)
+            if not bool(inferred.get("ok", False)):
+                snapshot = _continuous_error_snapshot(request, {
+                    "error_info": inferred.get("error_info", {
+                        "code": "mediapipe_inference_failed",
+                        "message": f"Failed to infer pose landmarks from replay source '{video_path}'",
+                    }),
+                    "raw_tracking_frame": inferred.get("raw_tracking_frame", {}),
+                    "selected_camera_id": video_path,
+                    "health": {
+                        "camera_accessible": True,
+                    },
+                }, sample_index, loop_started_ms)
+                _write_session_snapshot(session_dir, snapshot)
+                return 1
+
+            raw_tracking_frame = inferred.get("raw_tracking_frame", {}).copy()
+            landmarks = raw_tracking_frame.get("landmarks")
+            health = {
+                **_base_health("startup", runtime),
+                "status": "running",
+                "runtime_available": True,
+                "bridge_connected": True,
+                "process_active": True,
+                "camera_accessible": True,
+                "tracking_active": True,
+                "healthy": True,
+                "loop_iteration": sample_index,
+                "loop_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(loop_started_ms / 1000.0)),
+                "probed_at": _now_iso(),
+                "selected_camera_id": video_path,
+                "selected_camera_label": os.path.basename(video_path) or video_path,
+                "notes": list(inferred.get("notes", [])) + ["Continuous replay runtime loop remains alive while replay frames are available."],
+            }
+            if isinstance(landmarks, list) and landmarks:
+                health["notes"].append(f"Returning {len(landmarks)} raw replay pose landmark(s).")
+            else:
+                health["notes"].append("Returning no raw landmarks because the replay frame did not produce a pose.")
+            _write_session_snapshot(session_dir, {
+                "ok": True,
+                "cameras": _enumerate_cameras(runtime),
+                "selected_camera_id": video_path,
+                "health": health,
+                "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+                "raw_tracking_frame": raw_tracking_frame,
+            })
+            sample_index += 1
+            time.sleep(float(interval_ms) / 1000.0)
+    finally:
+        if capture is not None:
+            capture.release()
 
 
 def _landmarks_from_legacy_results(results: Any) -> List[Dict[str, float]]:
@@ -593,7 +843,7 @@ def _preview_descriptor(preview: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _select_camera(request: Dict[str, Any]) -> Dict[str, Any]:
+def _select_source(request: Dict[str, Any]) -> Dict[str, Any]:
     operation = str(request.get("operation", "startup"))
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
     source = request.get("source", {}) if isinstance(request.get("source", {}), dict) else {}
@@ -601,10 +851,33 @@ def _select_camera(request: Dict[str, Any]) -> Dict[str, Any]:
     health = _base_health(operation, runtime)
 
     source_kind = str(source.get("kind", "live_camera"))
+    if source_kind == "video_file":
+        video_path = str(source.get("path", "")).strip()
+        if video_path == "":
+            error_info = {
+                "code": "video_file_path_missing",
+                "message": "Replay video_file sessions require source.path",
+            }
+            return {"ok": False, "cameras": cameras, "health": {**health, "status": "error", "healthy": False, "last_error": error_info}, "error_info": error_info}
+        if not os.path.isfile(video_path):
+            error_info = {
+                "code": "video_file_missing",
+                "message": f"Replay video source not found at '{video_path}'",
+            }
+            return {"ok": False, "cameras": cameras, "health": {**health, "status": "error", "healthy": False, "last_error": error_info}, "error_info": error_info}
+        health.update({
+            "camera_accessible": True,
+            "healthy": True,
+            "selected_camera_id": video_path,
+            "selected_camera_label": os.path.basename(video_path) or video_path,
+            "notes": health["notes"] + [f"Selected replay source '{video_path}' for truthful frame capture."],
+        })
+        return {"ok": True, "runtime": runtime, "source": source, "selected": {"path": video_path, "available": True}, "selected_camera_id": video_path, "cameras": cameras, "health": health}
+
     if source_kind != "live_camera":
         error_info = {
             "code": "unsupported_source_kind",
-            "message": f"MediaPipe Python probe only supports live_camera in this slice, got '{source_kind}'",
+            "message": f"MediaPipe Python probe only supports live_camera or video_file in this slice, got '{source_kind}'",
         }
         return {"ok": False, "cameras": cameras, "health": {**health, "status": "error", "healthy": False, "last_error": error_info}, "error_info": error_info}
 
@@ -650,17 +923,19 @@ def _select_camera(request: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
-    selection = _select_camera(request)
+    selection = _select_source(request)
     if not bool(selection.get("ok", False)):
         return selection
 
     runtime: Dict[str, Any] = selection["runtime"]
+    source: Dict[str, Any] = selection["source"]
     preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
     selected_camera_id = str(selection["selected_camera_id"])
     cameras = selection["cameras"]
     health = selection["health"]
 
-    sampled = _capture_live_camera_sample(selected_camera_id, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
+    source_kind = str(source.get("kind", "live_camera"))
+    sampled = _capture_video_file_sample(selected_camera_id, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp) if source_kind == "video_file" else _capture_live_camera_sample(selected_camera_id, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp)
     if not bool(sampled.get("ok", False)):
         error_info = sampled.get("error_info", {
             "code": "camera_sample_failed",
@@ -805,6 +1080,10 @@ def _continuous_error_snapshot(request: Dict[str, Any], failure: Dict[str, Any],
 
 
 def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
+    source = request.get("source", {}) if isinstance(request.get("source", {}), dict) else {}
+    if str(source.get("kind", "live_camera")) == "video_file":
+        return _run_video_file_session(request, session_dir)
+
     os.makedirs(session_dir, exist_ok=True)
     _write_json_atomic(_session_request_path(session_dir), request)
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}

@@ -87,6 +87,7 @@ func test_startup_keeps_tracking_idle_when_sampled_frame_has_no_pose_landmarks_b
 	var bridge = MediaPipePythonRuntimeBridge.new()
 	var snapshot := bridge.startup(_make_runtime_config({
 		"runtime": {
+			"health_poll_interval_ms": 150,
 			"environment": {
 				"AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": JSON.stringify({
 					_fixture_root.path_join("video0"): {"width": 800, "height": 600},
@@ -116,17 +117,86 @@ func test_list_cameras_enumerates_runtime_surface_using_last_runtime_config() ->
 	assert_true(bridge.poll_health()["healthy"])
 	bridge.shutdown()
 
-func test_startup_rejects_unsupported_video_file_mode_honestly() -> void:
+func test_startup_supports_replay_video_file_source_and_keeps_runtime_alive_until_fixture_eof() -> void:
+	var replay_path := _write_fixture_video("gesture_replay.mp4")
 	var bridge = MediaPipePythonRuntimeBridge.new()
 	var snapshot := bridge.startup(_make_runtime_config({
 		"source": {
 			"kind": "video_file",
-			"path": "res://clips/demo.mp4"
+			"path": replay_path
+		},
+		"preview": {
+			"flip_horizontal": false
+		},
+		"runtime": {
+			"environment": {
+				"AEROBEAT_CAMERA_ROOT": _fixture_root,
+				"AEROBEAT_CAMERA_PATTERN": "video*",
+				"AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": JSON.stringify({
+					replay_path: {
+						"sequence": [
+							{
+								"width": 960,
+								"height": 540,
+								"timestamp_ms": 101,
+								"landmarks": [
+									{"id": 4, "x": 0.2, "y": 0.3, "z": -0.1, "visibility": 0.9}
+								]
+							},
+							{
+								"width": 960,
+								"height": 540,
+								"timestamp_ms": 202
+							},
+							{
+								"width": 960,
+								"height": 540,
+								"timestamp_ms": 303
+							}
+						]
+					}
+				})
+			}
+		}
+	}))
+
+	assert_true(snapshot["ok"])
+	assert_eq(snapshot["raw_tracking_frame"]["source_kind"], "video_file")
+	assert_eq(snapshot["raw_tracking_frame"]["source_id"], replay_path)
+	assert_eq(snapshot["raw_tracking_frame"]["tracking_state"], "tracked")
+	assert_eq(int(snapshot["raw_tracking_frame"]["frame_size"]["x"]), 960)
+	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_RUNNING)
+	assert_true(bridge.poll_health()["process_active"])
+	assert_true(bridge.poll_health()["tracking_active"])
+	assert_eq(bridge.poll_health()["selected_camera_id"], replay_path)
+
+	OS.delay_msec(220)
+	var second := bridge.poll_snapshot()
+	assert_true(second["ok"])
+	assert_eq(second["raw_tracking_frame"]["source_kind"], "video_file")
+	assert_true(int(second["raw_tracking_frame"]["timestamp_ms"]) >= 202)
+
+	OS.delay_msec(500)
+	var third := bridge.poll_snapshot()
+	assert_true(third["ok"])
+	assert_false(bridge.poll_health()["process_active"])
+	assert_false(bridge.poll_health()["tracking_active"])
+	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_IDLE)
+
+	var shutdown := bridge.shutdown()
+	assert_true(shutdown["ok"])
+
+func test_startup_rejects_missing_replay_video_file_honestly() -> void:
+	var bridge = MediaPipePythonRuntimeBridge.new()
+	var snapshot := bridge.startup(_make_runtime_config({
+		"source": {
+			"kind": "video_file",
+			"path": _fixture_root.path_join("missing_replay.mp4")
 		}
 	}))
 
 	assert_false(snapshot["ok"])
-	assert_eq(snapshot["error_info"]["code"], "unsupported_source_kind")
+	assert_eq(snapshot["error_info"]["code"], "video_file_missing")
 	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_ERROR)
 	assert_false(bridge.poll_health()["runtime_available"])
 
@@ -210,6 +280,13 @@ func _write_fixture_camera(name: String) -> void:
 	var file := FileAccess.open(_fixture_root.path_join(name), FileAccess.WRITE)
 	file.store_string("fixture")
 	file.close()
+
+func _write_fixture_video(name: String) -> String:
+	var path := _fixture_root.path_join(name)
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	file.store_string("fixture-video")
+	file.close()
+	return path
 
 func _deep_merge(base: Dictionary, incoming: Dictionary) -> void:
 	for key in incoming.keys():

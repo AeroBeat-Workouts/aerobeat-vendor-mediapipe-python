@@ -326,11 +326,22 @@ func _prepare_vendor_config(vendor_config: Dictionary, validate_source: bool = t
 
 	var source: Dictionary = merged.get("source", {})
 	var source_kind := str(source.get("kind", MediaPipePythonConfig.DEFAULT_SOURCE_KIND))
-	if validate_source and source_kind != MediaPipePythonConfig.DEFAULT_SOURCE_KIND:
-		return _config_failure(
-			"unsupported_source_kind",
-			"MediaPipe Python runtime bridge only supports '%s' in this slice, got '%s'" % [MediaPipePythonConfig.DEFAULT_SOURCE_KIND, source_kind]
-		)
+	if validate_source:
+		if source_kind == MediaPipePythonConfig.DEFAULT_SOURCE_KIND:
+			pass
+		elif source_kind == "video_file":
+			var source_path := _resolve_source_path(str(source.get("path", "")))
+			if source_path == "":
+				return _config_failure("video_file_path_missing", "MediaPipe Python replay runtime requires source.path for video_file sessions")
+			if FileAccess.file_exists(source_path) == false:
+				return _config_failure("video_file_missing", "MediaPipe Python replay source not found at '%s'" % source_path)
+			source["path"] = source_path
+			merged["source"] = source
+		else:
+			return _config_failure(
+				"unsupported_source_kind",
+				"MediaPipe Python runtime bridge only supports '%s' or 'video_file' in this slice, got '%s'" % [MediaPipePythonConfig.DEFAULT_SOURCE_KIND, source_kind]
+			)
 
 	runtime["python_executable"] = python_executable
 	runtime["entrypoint"] = entrypoint_path
@@ -478,6 +489,15 @@ func _resolve_working_directory(working_directory_raw: String) -> String:
 	if working_directory_raw.is_absolute_path():
 		return working_directory_raw
 	return _repo_root_path().path_join(working_directory_raw)
+
+func _resolve_source_path(source_path_raw: String) -> String:
+	if source_path_raw == "":
+		return ""
+	if source_path_raw.begins_with("res://") or source_path_raw.begins_with("user://"):
+		return ProjectSettings.globalize_path(source_path_raw)
+	if source_path_raw.is_absolute_path():
+		return source_path_raw
+	return _repo_root_path().path_join(source_path_raw)
 
 func _repo_root_path() -> String:
 	var script_path := str(get_script().resource_path)
