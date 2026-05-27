@@ -135,6 +135,29 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             }
             self.assertEqual(probe._resolve_pose_landmarker_model_path(runtime), str(explicit_model))
 
+    def test_resolve_pose_landmarker_model_path_uses_model_complexity_specific_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            models_dir = Path(temp_dir) / "models"
+            models_dir.mkdir()
+            full_model = models_dir / "pose_landmarker_full.task"
+            full_model.write_bytes(b"model")
+            runtime = {
+                "working_directory": temp_dir,
+                "model_complexity": 1,
+            }
+            self.assertEqual(probe._resolve_pose_landmarker_model_path(runtime), str(full_model))
+
+    def test_resolve_pose_landmarker_model_path_does_not_silently_fallback_to_lite_for_higher_complexity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            models_dir = Path(temp_dir) / "models"
+            models_dir.mkdir()
+            (models_dir / "pose_landmarker_lite.task").write_bytes(b"model")
+            runtime = {
+                "working_directory": temp_dir,
+                "model_complexity": 2,
+            }
+            self.assertEqual(probe._resolve_pose_landmarker_model_path(runtime), "")
+
     def test_tasks_path_fails_honestly_when_model_is_missing(self):
         runtime = {"working_directory": tempfile.gettempdir()}
         with mock.patch.dict("sys.modules", {"cv2": _FakeCv2, **_fake_tasks_mediapipe_module()}, clear=False):

@@ -8,10 +8,12 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-_DEFAULT_POSE_LANDMARKER_MODEL_PATHS: Sequence[str] = (
-    "models/pose_landmarker_lite.task",
-    "runtime/models/pose_landmarker_lite.task",
-)
+_DEFAULT_MODEL_COMPLEXITY = 1
+_MODEL_FILENAMES = {
+    0: "pose_landmarker_lite.task",
+    1: "pose_landmarker_full.task",
+    2: "pose_landmarker_heavy.task",
+}
 
 _SESSION_SNAPSHOT_FILENAME = "runtime_snapshot.json"
 _SESSION_STOP_FILENAME = "stop"
@@ -606,6 +608,25 @@ def _landmarks_from_tasks_result(result: Any) -> List[Dict[str, float]]:
     return landmarks
 
 
+def _normalize_model_complexity(runtime: Dict[str, Any]) -> int:
+    raw = runtime.get("model_complexity", _DEFAULT_MODEL_COMPLEXITY)
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MODEL_COMPLEXITY
+    if parsed < 0 or parsed > 2:
+        return _DEFAULT_MODEL_COMPLEXITY
+    return parsed
+
+
+def _default_pose_landmarker_model_paths(runtime: Dict[str, Any]) -> Sequence[str]:
+    model_filename = _MODEL_FILENAMES.get(_normalize_model_complexity(runtime), _MODEL_FILENAMES[_DEFAULT_MODEL_COMPLEXITY])
+    return (
+        f"models/{model_filename}",
+        f"runtime/models/{model_filename}",
+    )
+
+
 def _resolve_pose_landmarker_model_path(runtime: Dict[str, Any]) -> str:
     environment = _runtime_env(runtime)
     candidate_values = [
@@ -622,7 +643,7 @@ def _resolve_pose_landmarker_model_path(runtime: Dict[str, Any]) -> str:
         if os.path.isfile(resolved):
             return resolved
 
-    for candidate in _DEFAULT_POSE_LANDMARKER_MODEL_PATHS:
+    for candidate in _default_pose_landmarker_model_paths(runtime):
         resolved = _resolve_runtime_path(runtime, candidate)
         if os.path.isfile(resolved):
             return resolved
@@ -657,7 +678,7 @@ def _infer_pose_landmarks_tasks(mp: Any, runtime: Dict[str, Any], frame_rgb: Any
             "ok": False,
             "error_info": {
                 "code": "mediapipe_model_missing",
-                "message": "MediaPipe tasks pose inference requires a pose landmarker .task model asset, but none was found. Checked runtime.pose_landmarker_model_path, runtime.model_asset_path, AEROBEAT_MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH, MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH, and default repo model locations.",
+                "message": "MediaPipe tasks pose inference requires a pose landmarker .task model asset, but none was found. Checked runtime.pose_landmarker_model_path, runtime.model_asset_path, runtime.model_complexity-selected default repo model locations, AEROBEAT_MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH, and MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH.",
             },
         }
 

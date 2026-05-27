@@ -12,6 +12,7 @@ const DEFAULT_RUNTIME_ENTRYPOINT := "runtime/mediapipe_runtime_probe.py"
 const DEFAULT_BOOT_TIMEOUT_MS := 8000
 const DEFAULT_SHUTDOWN_TIMEOUT_MS := 5000
 const DEFAULT_HEALTH_POLL_INTERVAL_MS := 250
+const DEFAULT_MODEL_COMPLEXITY := 1
 
 static func public_defaults() -> Dictionary:
 	return {
@@ -59,6 +60,7 @@ static func vendor_defaults() -> Dictionary:
 			"working_directory": "",
 			"arguments": [],
 			"environment": {},
+			"model_complexity": DEFAULT_MODEL_COMPLEXITY,
 			"pose_landmarker_model_path": "",
 			"boot_timeout_ms": DEFAULT_BOOT_TIMEOUT_MS,
 			"shutdown_timeout_ms": DEFAULT_SHUTDOWN_TIMEOUT_MS,
@@ -91,8 +93,24 @@ static func make_vendor_runtime_config(public_config: Dictionary = {}) -> Dictio
 	if public_config.get("vendor", {}) is Dictionary:
 		_deep_merge(vendor_config, public_config.get("vendor", {}))
 
+	vendor_config["runtime"]["model_complexity"] = _normalize_model_complexity(vendor_config["runtime"].get("model_complexity", DEFAULT_MODEL_COMPLEXITY))
 	vendor_config["backend"] = BACKEND_ID
 	return vendor_config
+
+static func get_required_model_filename(model_complexity: int) -> String:
+	match model_complexity:
+		2:
+			return "pose_landmarker_heavy.task"
+		1:
+			return "pose_landmarker_full.task"
+		_:
+			return "pose_landmarker_lite.task"
+
+static func _normalize_model_complexity(value: Variant) -> int:
+	var parsed := int(value)
+	if parsed < 0 or parsed > 2:
+		return DEFAULT_MODEL_COMPLEXITY
+	return parsed
 
 static func _deep_merge(base: Dictionary, incoming: Dictionary) -> void:
 	for key in incoming.keys():

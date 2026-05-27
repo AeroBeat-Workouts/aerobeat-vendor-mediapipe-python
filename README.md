@@ -20,12 +20,17 @@ This repo now supports both of these host package shapes for the sampled live-ca
 - legacy `mediapipe.solutions.pose.Pose(...)`
 - tasks-era `mediapipe.tasks` + `PoseLandmarker`
 
-The tasks-era path requires a real `.task` pose-landmarker model asset. By default the runtime now looks for a repo-owned model at:
+The tasks-era path requires a real `.task` pose-landmarker model asset. The vendor runtime now resolves the default repo-owned model by `runtime.model_complexity` using the same filename mapping as the legacy local sidecar lane:
 
-- `models/pose_landmarker_lite.task`
+- `0` -> `models/pose_landmarker_lite.task`
+- `1` -> `models/pose_landmarker_full.task`
+- `2` -> `models/pose_landmarker_heavy.task`
+
+If a higher-complexity variant is requested, the runtime does not silently fall back to lite; it fails honestly unless that exact variant or an explicit override path is present.
 
 You can also override the model path through vendor runtime config:
 
+- `runtime.model_complexity`
 - `runtime.pose_landmarker_model_path`
 - `runtime.model_asset_path`
 - `runtime.environment.AEROBEAT_MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH`
