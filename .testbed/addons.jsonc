@@ -1,6 +1,12 @@
 {
   "$schema": "https://chickensoft.games/schemas/addons.schema.json",
   "addons": {
+    // Install this repo into the hidden workbench the same way a consumer does.
+    "aerobeat-vendor-mediapipe-python": {
+      "url": "..",
+      "source": "symlink",
+      "subfolder": "/"
+    },
     // Camera-tracking contract shell under test for backend compatibility.
     "aerobeat-tool-camera-tracking": {
       "url": "git@github.com:AeroBeat-Workouts/aerobeat-tool-camera-tracking.git",
