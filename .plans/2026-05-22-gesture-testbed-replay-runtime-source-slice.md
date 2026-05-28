@@ -94,9 +94,9 @@ This plan starts after the live-only wave is green enough to avoid mixing live a
 **Files Created/Deleted/Modified:**
 - none required unless a minimal QA artifact is necessary
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** QA passed with both repo-local automated validation and direct replay probes. Exact commands run from the repo root: `python3 -m unittest runtime.tests.test_mediapipe_runtime_probe` ✅ (`7` tests passed); `godot --headless --path .testbed --import` ✅ (successful import; no blocking errors); `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit` ✅ (`15/15` tests passed, `140` asserts); `godot --headless --path .testbed --script /tmp/avmp_replay_qa_bridge_smoke.gd` ✅ (bridge-level replay smoke returned honest `video_file_path_missing` and `video_file_missing` failures, accepted `source.kind = video_file` startup, emitted `source_kind = video_file` raw frames, advanced replay timestamps across successive polls, and ended at EOF with `status = idle`, `process_active = false`, `tracking_active = false`, `raw_tracking_frame = {}`); `python3 /tmp/avmp_replay_probe_qa.py` ✅ (direct probe proof returned the same truthful failure codes, one-shot replay startup with `source_kind = video_file` / `frame_size = {x: 640, y: 360}`, then a continuous replay session with two running snapshots followed by an idle EOF snapshot and exit code `0`). Ownership/boundary check: `git diff --name-only 61de6d8~1 61de6d8` showed only `.plans/2026-05-22-gesture-testbed-replay-runtime-source-slice.md`, `.testbed/tests/test_mediapipe_python_backend.gd`, `.testbed/tests/test_mediapipe_python_runtime_bridge.gd`, `runtime/mediapipe_runtime_probe.py`, `runtime/tests/test_mediapipe_runtime_probe.py`, and `src/MediaPipePythonRuntimeBridge.gd`; `git diff --name-only 61de6d8~1 61de6d8 -- .testbed/addons .testbed/.addons` returned no addon-mirror edits; `git diff --name-only 61de6d8~1 61de6d8 -- src/MediaPipePythonCameraTrackingBackend.gd` returned no backend-shell/public-lifecycle drift. QA conclusion: replay/video-file support is truthful and remains inside vendor-owned runtime/source boundaries.
 
 ---
 
@@ -114,9 +114,9 @@ This plan starts after the live-only wave is green enough to avoid mixing live a
 **Files Created/Deleted/Modified:**
 - none required unless a minimal audit artifact is necessary
 
-**Status:** ⏳ Pending
+**Status:** ✅ Complete
 
-**Results:** Pending.
+**Results:** Auditor independently verified bead readiness, claimed `avmp-7uq`, and re-ran the replay/runtime proof instead of relying on coder or QA summary alone. Exact checks: `bd show avmp-7uq --json` confirmed QA dependency `avmp-9f2` was closed before claim; `bd update avmp-7uq --status in_progress --json` claimed the audit bead; `git diff --stat 61de6d8~1 61de6d8` / `git diff --name-only 61de6d8~1 61de6d8` confirmed the implementation touched only the plan, repo-local tests, `runtime/mediapipe_runtime_probe.py`, and `src/MediaPipePythonRuntimeBridge.gd`; `python3 -m unittest runtime.tests.test_mediapipe_runtime_probe` passed (`7` tests); `godot --headless --path .testbed --import` completed; `godot --headless --path .testbed --script addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit` passed (`15/15` tests, `140` asserts). Independent direct probe evidence: a fresh Python harness against `runtime/mediapipe_runtime_probe.py` returned truthful `video_file_path_missing` and `video_file_missing` errors, returned one-shot replay success with `raw_tracking_frame.source_kind = video_file`, `source_id = <fixture path>`, and `tracking_state = tracked`, then launched a continuous replay session that produced one running snapshot, then a later running snapshot with a newer timestamp in the same session, and finally an idle EOF snapshot with `process_active = false`, `tracking_active = false`, `raw_tracking_frame = {}`, and process exit code `0`. Boundary audit: no production diff touched `src/MediaPipePythonCameraTrackingBackend.gd`, addon mirrors, or tool-owned public schema surfaces, so the slice stayed inside the planned vendor-owned runtime/source boundary. Auditor verdict: the replay runtime/source slice is genuinely complete for its planned scope, so bead `avmp-7uq` was closed.
 
 ---
 
@@ -132,16 +132,16 @@ Cross-repo coordination note: this replay vendor slice should begin after the li
 
 ## Final Results
 
-**Status:** ⚠️ Partial
+**Status:** ✅ Complete
 
-**What We Built:** The vendor repo now owns the narrow replay/runtime source slice needed for gesture-testbed `mediapipe_replay` startup and continuous replay truth: replay/video-file configs are accepted at the bridge, replay paths are resolved/validated before Python launch, the runtime emits truthful replay raw frames while frames are available, and replay EOF shuts the runtime down cleanly without pretending a live-camera fault.
+**What We Built:** The vendor repo now owns the planned replay/runtime source slice needed for gesture-testbed `mediapipe_replay` startup and continuous replay truth: replay/video-file configs are accepted at the bridge, replay paths are resolved/validated before Python launch, the runtime emits truthful replay raw frames with `source_kind = video_file` and advancing timestamps while frames remain in one continuous session, and replay EOF shuts the runtime down cleanly to idle/non-active without pretending a live-camera or runtime crash.
 
-**Reference Check:** `REF-04` and `REF-06` are now satisfied for the planned replay/runtime source scope. `REF-03`’s replay expectations are covered only at the vendor boundary for now; tool-owned public replay service semantics and downstream adapter/session compatibility remain for later QA/audit and follow-up slices.
+**Reference Check:** `REF-04`, `REF-05`, and `REF-06` satisfy the planned replay/runtime source scope: vendor config shape is accepted honestly, the runtime bridge keeps replay behavior vendor-owned, and the Python runtime probe reports truthful replay source and health state. `REF-03` remains satisfied only at the vendor boundary for this slice; tool-owned public replay service semantics and downstream adapter/session compatibility still belong to later slices rather than this vendor runtime/source change.
 
 **Commits:**
 - `61de6d8` - `Add truthful replay runtime source support`
 
-**Lessons Learned:** The replay blocker really was vendor-owned runtime/source behavior. Once the bridge and probe handle `video_file` truthfully, the remaining work cleanly stays in tool/input-owned layers instead of forcing vendor code to impersonate them.
+**Lessons Learned:** The replay blocker really was vendor-owned runtime/source behavior. Once the bridge and probe handle `video_file` truthfully, the remaining work cleanly stays in tool/input-owned layers instead of forcing vendor code to impersonate them. An independent audit pass mattered here because the key truth conditions were behavioral — accepted config, truthful missing-path failures, continuous session advancement, and clean EOF idle settlement — not just static diff shape.
 
 ---
 
