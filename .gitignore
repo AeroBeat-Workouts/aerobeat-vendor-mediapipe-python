@@ -27,3 +27,7 @@ Thumbs.db
 
 # Godot UID sidecars
 *.uid
+
+.claude/
+CLAUDE.md
+AGENTS.md
