@@ -13,6 +13,7 @@ var _last_vendor_config: Dictionary = {}
 var _last_health: Dictionary = MediaPipePythonRuntimeHealth.unavailable()
 var _last_cameras: Array = []
 var _last_preview_descriptor: Dictionary = {}
+var _last_playback_status: Dictionary = {}
 var _last_raw_tracking_frame: Dictionary = {}
 var _last_selected_camera_id: String = ""
 var _last_error_info: Dictionary = {}
@@ -40,12 +41,14 @@ func shutdown() -> Dictionary:
 			"notes": notes
 		})
 		_last_preview_descriptor = {}
+		_last_playback_status = {}
 		_last_raw_tracking_frame = {}
 		return {
 			"ok": true,
 			"health": _last_health.duplicate(true),
 			"cameras": _last_cameras.duplicate(true),
 			"preview_descriptor": {},
+			"playback_status": _last_playback_status.duplicate(true),
 			"raw_tracking_frame": {}
 		}
 
@@ -75,6 +78,7 @@ func shutdown() -> Dictionary:
 	var snapshot := _read_session_snapshot(_session_dir)
 	_cleanup_session_files()
 	_last_preview_descriptor = {}
+	_last_playback_status = {}
 	_last_raw_tracking_frame = {}
 	_last_health = MediaPipePythonRuntimeHealth.idle({
 		"bridge_connected": true,
@@ -97,6 +101,7 @@ func shutdown() -> Dictionary:
 		"health": _last_health.duplicate(true),
 		"cameras": _last_cameras.duplicate(true),
 		"preview_descriptor": {},
+		"playback_status": _last_playback_status.duplicate(true),
 		"raw_tracking_frame": {}
 	}
 
@@ -120,6 +125,9 @@ func list_cameras() -> Array:
 		return snapshot.get("cameras", []).duplicate(true)
 	return _last_cameras.duplicate(true)
 
+func get_last_playback_status() -> Dictionary:
+	return _last_playback_status.duplicate(true)
+
 func poll_health() -> Dictionary:
 	if _session_dir != "" and _session_pid > 0:
 		poll_snapshot()
@@ -132,6 +140,7 @@ func poll_snapshot() -> Dictionary:
 			"health": _last_health.duplicate(true),
 			"cameras": _last_cameras.duplicate(true),
 			"preview_descriptor": _last_preview_descriptor.duplicate(true),
+			"playback_status": _last_playback_status.duplicate(true),
 			"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true)
 		}
 
@@ -143,6 +152,7 @@ func poll_snapshot() -> Dictionary:
 				"health": _last_health.duplicate(true),
 				"cameras": _last_cameras.duplicate(true),
 				"preview_descriptor": _last_preview_descriptor.duplicate(true),
+				"playback_status": _last_playback_status.duplicate(true),
 				"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true)
 			}
 		return _remember_failure({
@@ -173,6 +183,7 @@ func poll_snapshot() -> Dictionary:
 		"health": _last_health.duplicate(true),
 		"cameras": _last_cameras.duplicate(true),
 		"preview_descriptor": _last_preview_descriptor.duplicate(true),
+		"playback_status": _last_playback_status.duplicate(true),
 		"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true),
 		"error_info": snapshot.get("error_info", {}).duplicate(true)
 	}
@@ -228,6 +239,7 @@ func _start_runtime_session(operation: String, vendor_config: Dictionary) -> Dic
 				"health": _last_health.duplicate(true),
 				"cameras": _last_cameras.duplicate(true),
 				"preview_descriptor": _last_preview_descriptor.duplicate(true),
+				"playback_status": _last_playback_status.duplicate(true),
 				"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true)
 			}
 		if OS.is_process_running(_session_pid) == false:
@@ -301,6 +313,7 @@ func _run_runtime_operation(operation: String, vendor_config: Dictionary) -> Dic
 func _sync_from_snapshot(snapshot: Dictionary) -> void:
 	_last_cameras = MediaPipePythonCameraInventory.normalize(snapshot.get("cameras", []))
 	_last_preview_descriptor = snapshot.get("preview_descriptor", {}).duplicate(true)
+	_last_playback_status = snapshot.get("playback_status", {}).duplicate(true)
 	_last_raw_tracking_frame = snapshot.get("raw_tracking_frame", {}).duplicate(true)
 	_last_selected_camera_id = str(snapshot.get("selected_camera_id", _last_selected_camera_id))
 	_last_error_info = snapshot.get("error_info", {}).duplicate(true)
@@ -463,6 +476,7 @@ func _remember_failure(error_info: Dictionary, health: Dictionary, cameras: Arra
 	if not cameras.is_empty():
 		_last_cameras = MediaPipePythonCameraInventory.normalize(cameras)
 	_last_preview_descriptor = {}
+	_last_playback_status = {}
 	_last_raw_tracking_frame = {}
 	return {
 		"ok": false,

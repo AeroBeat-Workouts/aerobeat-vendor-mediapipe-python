@@ -16,6 +16,7 @@ _MODEL_FILENAMES = {
 }
 
 _SESSION_SNAPSHOT_FILENAME = "runtime_snapshot.json"
+_SESSION_PREVIEW_FRAME_FILENAME = "preview_frame.jpg"
 _SESSION_STOP_FILENAME = "stop"
 _SESSION_REQUEST_FILENAME = "request.json"
 
@@ -421,6 +422,8 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     sample_index = 0
     fixture_map = _sample_fixture_map(runtime)
     use_fixture_sequence = isinstance(fixture_map.get(video_path), dict)
+    start_time_sec = max(0.0, float(source.get("start_time_sec", 0.0) or 0.0))
+    duration_sec = 0.0
 
     capture = None
     cv2 = None
@@ -449,6 +452,12 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
             }, sample_index, loop_started_ms)
             _write_session_snapshot(session_dir, snapshot)
             return 1
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+        if fps > 0.0 and frame_count > 0.0:
+            duration_sec = frame_count / fps
+        if start_time_sec > 0.0:
+            capture.set(cv2.CAP_PROP_POS_MSEC, start_time_sec * 1000.0)
 
     try:
         while True:
@@ -470,6 +479,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                         "notes": [f"Replay session for '{video_path}' stopped cleanly."],
                     },
                     "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+                    "playback_status": _playback_status(video_path, start_time_sec, duration_sec, "paused", True),
                     "raw_tracking_frame": {},
                 }
                 _write_session_snapshot(session_dir, shutdown_snapshot)
@@ -484,7 +494,9 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 assert capture is not None
                 ok, frame = capture.read()
                 if not ok or frame is None:
-                    _write_session_snapshot(session_dir, _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index))
+                    eof_snapshot = _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index)
+                    eof_snapshot["playback_status"] = _playback_status(video_path, duration_sec, duration_sec, "ended", True)
+                    _write_session_snapshot(session_dir, eof_snapshot)
                     return 0
                 shape = getattr(frame, "shape", None)
                 if shape is None or len(shape) < 2:
@@ -552,12 +564,17 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 health["notes"].append(f"Returning {len(landmarks)} raw replay pose landmark(s).")
             else:
                 health["notes"].append("Returning no raw landmarks because the replay frame did not produce a pose.")
+            current_time_sec = start_time_sec
+            if capture is not None and cv2 is not None:
+                current_time_sec = max(start_time_sec, float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0)
+            preview_descriptor = _with_preview_frame(session_dir, request.get("preview", {}), sampled.get("frame_bgr"))
             _write_session_snapshot(session_dir, {
                 "ok": True,
                 "cameras": _enumerate_cameras(runtime),
                 "selected_camera_id": video_path,
                 "health": health,
-                "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+                "preview_descriptor": preview_descriptor,
+                "playback_status": _playback_status(video_path, current_time_sec, duration_sec),
                 "raw_tracking_frame": raw_tracking_frame,
             })
             sample_index += 1
@@ -1019,6 +1036,7 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
         "health": health,
         "preview_descriptor": _preview_descriptor(preview),
         "raw_tracking_frame": raw_tracking_frame,
+        "frame_bgr": sampled.get("frame_bgr"),
     }
 
 
@@ -1030,6 +1048,58 @@ def _write_json_atomic(path: str, payload: Dict[str, Any]) -> None:
     with open(temp_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
     os.replace(temp_path, path)
+
+
+def _session_preview_frame_path(session_dir: str) -> str:
+    return os.path.join(session_dir, _SESSION_PREVIEW_FRAME_FILENAME)
+
+
+def _write_preview_frame(session_dir: str, frame_bgr: Any) -> Dict[str, Any]:
+    if session_dir == "" or frame_bgr is None:
+        return {}
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return {}
+    preview_path = _session_preview_frame_path(session_dir)
+    if not cv2.imwrite(preview_path, frame_bgr):
+        return {}
+    return {
+        "image_path": preview_path,
+        "image_revision": int(time.time() * 1000),
+        "image_format": "jpg",
+    }
+
+
+def _with_preview_frame(session_dir: str, preview: Dict[str, Any], frame_bgr: Any) -> Dict[str, Any]:
+    descriptor = _preview_descriptor(preview)
+    descriptor.update(_write_preview_frame(session_dir, frame_bgr))
+    return descriptor
+
+
+def _playback_status(
+    source_path: str,
+    current_time_sec: float,
+    duration_sec: float,
+    state: str = "playing",
+    paused: bool = False,
+) -> Dict[str, Any]:
+    safe_duration = max(duration_sec, 0.0)
+    safe_position = max(current_time_sec, 0.0)
+    progress = 0.0
+    if safe_duration > 0.0:
+        progress = min(max(safe_position / safe_duration, 0.0), 1.0)
+    return {
+        "source": source_path,
+        "state": state,
+        "paused": paused,
+        "current_time_sec": safe_position,
+        "duration_sec": safe_duration,
+        "progress": progress,
+        "is_file_source": True,
+        "can_seek": True,
+        "can_pause": True,
+    }
 
 
 def _session_snapshot_path(session_dir: str) -> str:
@@ -1048,7 +1118,7 @@ def _write_session_snapshot(session_dir: str, payload: Dict[str, Any]) -> None:
     _write_json_atomic(_session_snapshot_path(session_dir), payload)
 
 
-def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any], sample_index: int, loop_started_ms: int) -> Dict[str, Any]:
+def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any], sample_index: int, loop_started_ms: int, session_dir: str = "") -> Dict[str, Any]:
     snapshot = sampled.copy()
     health = snapshot.get("health", {}).copy()
     health.update({
@@ -1067,6 +1137,9 @@ def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any
     notes.append("Continuous runtime loop remains alive and may return idle raw frames when no pose is currently visible.")
     health["notes"] = notes
     snapshot["health"] = health
+    preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
+    snapshot["preview_descriptor"] = _with_preview_frame(session_dir, preview, sampled.get("frame_bgr"))
+    snapshot.pop("frame_bgr", None)
     snapshot["ok"] = True
     return snapshot
 
@@ -1137,7 +1210,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
 
         sampled = _sample_once(request, sample_index=sample_index, dynamic_timestamp=True)
         if bool(sampled.get("ok", False)):
-            snapshot = _continuous_success_snapshot(request, sampled, sample_index, loop_started_ms)
+            snapshot = _continuous_success_snapshot(request, sampled, sample_index, loop_started_ms, session_dir)
             _write_session_snapshot(session_dir, snapshot)
         else:
             snapshot = _continuous_error_snapshot(request, sampled, sample_index, loop_started_ms)
