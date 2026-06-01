@@ -13,6 +13,30 @@ The current slice is intentionally a **truthful narrow continuous runtime lane**
 - `MediaPipePythonRuntimeHealth` helpers for vendor/runtime diagnostics
 - `MediaPipePythonFrameMapper` helpers that normalize raw vendor frames toward the shared tracking-frame contract
 
+## Canonical vendor runtime prep command
+
+The official prep/install entrypoint for this vendor lane is:
+
+```bash
+python3 scripts/prepare_vendor_runtime.py --json
+```
+
+What it truthfully owns:
+
+- creates or reuses a repo-local Python virtualenv at `/.venv`
+- installs this repo's runtime dependencies from `runtime/requirements.txt`
+- validates that the repo-owned Python entrypoint and default model asset exist
+- verifies the prepared virtualenv can import the runtime modules this lane actually needs (`mediapipe`, `cv2`, `numpy`)
+- returns a JSON payload with the prepared `python_executable`, `entrypoint`, `working_directory`, and default model path that downstream tooling can wire into vendor runtime config
+
+What it intentionally does **not** own:
+
+- GodotEnv addon restore/sync
+- `.testbed` import or GUT execution
+- downstream app lifecycle, bundle assembly, or consumer-specific config mutation
+
+If you only want to inspect/report an existing prepared env without reinstalling, use `--skip-install`. If you need to recreate the env from scratch, use `--force`.
+
 ## MediaPipe package compatibility and model asset truth
 
 This repo now supports both of these host package shapes for the sampled live-camera landmark pass:

@@ -25,6 +25,9 @@ Thumbs.db
 *.db
 .beads-credential-key
 
+# Repo-local Python runtime prep
+.venv/
+
 # Godot UID sidecars
 *.uid
 
