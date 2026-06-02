@@ -21,10 +21,10 @@
       "subfolder": "/",
       "source": "symlink"
     },
-    "gut": {
-      "url": "git@github.com:bitwes/Gut.git",
-      "checkout": "main",
-      "subfolder": "/addons/gut"
+    "aerobeat-vendor-godot-unit-test": {
+      "url": "../../aerobeat-vendor-godot-unit-test",
+      "subfolder": "/",
+      "source": "symlink"
     }
   }
 }

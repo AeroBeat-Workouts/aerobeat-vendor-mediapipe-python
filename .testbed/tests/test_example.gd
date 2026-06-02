@@ -34,4 +34,4 @@ func test_addons_manifest_pins_camera_tracking_contract_for_repo_local_validatio
 	assert_true(manifest_text.contains('"aerobeat-tool-camera-tracking"'), "addons manifest should pin aerobeat-tool-camera-tracking for backend validation")
 	assert_true(manifest_text.contains('"25f52da"'), "addons manifest should pin the approved contract-shell commit")
 	assert_true(manifest_text.contains('"aerobeat-tool-core"'), "addons manifest should keep aerobeat-tool-core available")
-	assert_true(manifest_text.contains('"gut"'), "addons manifest should keep gut available")
+	assert_true(manifest_text.contains('"aerobeat-vendor-godot-unit-test"'), "addons manifest should keep the vendor unit-test addon available")
