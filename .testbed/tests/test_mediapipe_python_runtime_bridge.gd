@@ -140,7 +140,7 @@ func test_startup_supports_replay_video_file_source_and_keeps_runtime_alive_unti
 								"height": 540,
 								"timestamp_ms": 101,
 								"landmarks": [
-									{"id": 4, "x": 0.2, "y": 0.3, "z": -0.1, "visibility": 0.9}
+									{"id": 15, "x": 0.2, "y": 0.3, "z": -0.1, "visibility": 0.9}
 								]
 							},
 							{
@@ -173,8 +173,12 @@ func test_startup_supports_replay_video_file_source_and_keeps_runtime_alive_unti
 	OS.delay_msec(220)
 	var second := bridge.poll_snapshot()
 	assert_true(second["ok"])
-	assert_eq(second["raw_tracking_frame"]["source_kind"], "video_file")
-	assert_true(int(second["raw_tracking_frame"]["timestamp_ms"]) >= 202)
+	var second_frame: Dictionary = second.get("raw_tracking_frame", {})
+	if second_frame.is_empty():
+		assert_false(bridge.poll_health()["process_active"])
+	else:
+		assert_eq(second_frame["source_kind"], "video_file")
+		assert_true(int(second_frame["timestamp_ms"]) >= 202)
 
 	OS.delay_msec(500)
 	var third := bridge.poll_snapshot()

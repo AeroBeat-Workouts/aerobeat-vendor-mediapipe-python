@@ -116,7 +116,25 @@ func test_vendor_runtime_config_translation_keeps_public_shape_and_vendor_overri
 	assert_eq(vendor_config["runtime"]["entrypoint"], "scripts/run_backend.py")
 	assert_eq(int(vendor_config["runtime"]["model_complexity"]), 2)
 	assert_eq(vendor_config["runtime"]["pose_landmarker_model_path"], "models/pose_landmarker_heavy.task")
+	assert_true(bool(vendor_config["runtime"].get("filter_enabled", false)))
+	assert_false(bool(vendor_config["runtime"].get("no_filter", true)))
 	assert_eq(MediaPipePythonConfig.get_required_model_filename(2), "pose_landmarker_heavy.task")
+
+func test_vendor_runtime_config_normalizes_simple_overlay_and_legacy_no_filter_truthfully() -> void:
+	var vendor_config := MediaPipePythonConfig.make_vendor_runtime_config({
+		"tracking": {
+			"quality": "simple",
+			"overlay_mode": "simple"
+		},
+		"runtime": {
+			"no_filter": true
+		}
+	})
+
+	assert_eq(String(vendor_config["tracking"].get("quality", "")), "optimized")
+	assert_eq(String(vendor_config["tracking"].get("overlay_mode", "")), "optimized")
+	assert_false(bool(vendor_config["runtime"].get("filter_enabled", true)))
+	assert_true(bool(vendor_config["runtime"].get("no_filter", false)))
 
 func test_inventory_and_frame_mapper_normalize_vendor_payloads() -> void:
 	var cameras := MediaPipePythonCameraInventory.normalize([

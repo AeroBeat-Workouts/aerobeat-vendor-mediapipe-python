@@ -85,6 +85,173 @@ def _preview_runtime_config(preview: Dict[str, Any], runtime: Dict[str, Any]) ->
     }
 
 
+_REDUCED_TRACKING_LANDMARK_IDS = {
+    0,
+    11, 12,
+    13, 14,
+    15, 16,
+    23, 24,
+    25, 26,
+    27, 28,
+}
+_ONE_EURO_MIN_CUTOFF = 1.0
+_ONE_EURO_BETA = 0.15
+_ONE_EURO_DERIVATE_CUTOFF = 1.0
+
+
+def _normalize_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _normalize_tracking_overlay_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "full":
+        return "full"
+    if normalized in {"simple", "optimized"}:
+        return "optimized"
+    if normalized in {"off", "none", "hidden"}:
+        return "off"
+    return "optimized"
+
+
+def _normalize_tracking_quality(value: Any, overlay_mode: Any = "optimized") -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"simple", "optimized"}:
+        return "optimized"
+    if normalized in {"full", "raw"}:
+        return "full"
+    overlay = _normalize_tracking_overlay_mode(overlay_mode)
+    return "full" if overlay == "full" else "optimized"
+
+
+def _tracking_semantics(request: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
+    tracking = request.get("tracking", {}) if isinstance(request.get("tracking", {}), dict) else {}
+    overlay_mode = _normalize_tracking_overlay_mode(tracking.get("overlay_mode", "optimized"))
+    quality = _normalize_tracking_quality(tracking.get("quality", "optimized"), overlay_mode)
+
+    filter_enabled = True
+    if "no_filter" in runtime:
+        filter_enabled = not _normalize_bool(runtime.get("no_filter"), False)
+    elif "filter_enabled" in runtime:
+        filter_enabled = _normalize_bool(runtime.get("filter_enabled"), True)
+    else:
+        tracking_filter = tracking.get("filter", {}) if isinstance(tracking.get("filter", {}), dict) else {}
+        tracking_smoothing = tracking.get("smoothing", {}) if isinstance(tracking.get("smoothing", {}), dict) else {}
+        if "enabled" in tracking_filter:
+            filter_enabled = _normalize_bool(tracking_filter.get("enabled"), True)
+        elif "enabled" in tracking_smoothing:
+            filter_enabled = _normalize_bool(tracking_smoothing.get("enabled"), True)
+
+    return {
+        "overlay_mode": overlay_mode,
+        "quality": quality,
+        "point_mode": "reduced" if quality == "optimized" else "full",
+        "filter_enabled": filter_enabled,
+    }
+
+
+def _one_euro_alpha(cutoff: float, delta_seconds: float) -> float:
+    if delta_seconds <= 0.0:
+        return 1.0
+    tau = 1.0 / (2.0 * math.pi * max(cutoff, 1e-6))
+    return 1.0 / (1.0 + tau / delta_seconds)
+
+
+def _one_euro_filter_value(value: float, state: Dict[str, Any], timestamp_ms: int) -> float:
+    previous_value = state.get("value")
+    previous_timestamp_ms = state.get("timestamp_ms")
+    previous_derivative = float(state.get("derivative", 0.0))
+    if previous_value is None or previous_timestamp_ms is None:
+        state["value"] = value
+        state["timestamp_ms"] = timestamp_ms
+        state["derivative"] = 0.0
+        return value
+
+    delta_seconds = max((int(timestamp_ms) - int(previous_timestamp_ms)) / 1000.0, 1e-6)
+    derivative = (value - float(previous_value)) / delta_seconds
+    derivative_alpha = _one_euro_alpha(_ONE_EURO_DERIVATE_CUTOFF, delta_seconds)
+    filtered_derivative = derivative_alpha * derivative + (1.0 - derivative_alpha) * previous_derivative
+    cutoff = _ONE_EURO_MIN_CUTOFF + _ONE_EURO_BETA * abs(filtered_derivative)
+    value_alpha = _one_euro_alpha(cutoff, delta_seconds)
+    filtered_value = value_alpha * value + (1.0 - value_alpha) * float(previous_value)
+    state["value"] = filtered_value
+    state["timestamp_ms"] = timestamp_ms
+    state["derivative"] = filtered_derivative
+    return filtered_value
+
+
+def _filter_landmarks(landmarks: List[Dict[str, Any]], timestamp_ms: int, filter_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    filtered: List[Dict[str, Any]] = []
+    seen_ids = set()
+    for landmark in landmarks:
+        landmark_id = int(landmark.get("id", -1))
+        seen_ids.add(landmark_id)
+        landmark_state = filter_state.setdefault(landmark_id, {})
+        filtered_landmark = dict(landmark)
+        for key in ("x", "y", "z", "visibility"):
+            if key in landmark:
+                filtered_landmark[key] = _one_euro_filter_value(float(landmark[key]), landmark_state.setdefault(key, {}), timestamp_ms)
+        filtered.append(filtered_landmark)
+    stale_ids = [landmark_id for landmark_id in filter_state.keys() if landmark_id not in seen_ids]
+    for landmark_id in stale_ids:
+        filter_state.pop(landmark_id, None)
+    return filtered
+
+
+def _apply_tracking_semantics(raw_tracking_frame: Dict[str, Any], semantics: Dict[str, Any], filter_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    frame = raw_tracking_frame.copy()
+    landmarks = frame.get("landmarks")
+    if not isinstance(landmarks, list) or len(landmarks) == 0:
+        if filter_state is not None:
+            filter_state.clear()
+        frame.pop("landmarks", None)
+        frame["tracking_state"] = "idle"
+        frame["vendor_tracking_semantics"] = {
+            "quality": semantics.get("quality", "optimized"),
+            "overlay_mode": semantics.get("overlay_mode", "optimized"),
+            "filter_enabled": bool(semantics.get("filter_enabled", True)),
+            "landmark_count_before": 0,
+            "landmark_count_after": 0,
+        }
+        return frame
+
+    processed = [dict(landmark) for landmark in landmarks if isinstance(landmark, dict)]
+    landmark_count_before = len(processed)
+    if semantics.get("point_mode") == "reduced":
+        processed = [landmark for landmark in processed if int(landmark.get("id", -1)) in _REDUCED_TRACKING_LANDMARK_IDS]
+    timestamp_ms = int(frame.get("timestamp_ms", _now_ms()))
+    if bool(semantics.get("filter_enabled", True)) and filter_state is not None:
+        processed = _filter_landmarks(processed, timestamp_ms, filter_state)
+    elif filter_state is not None:
+        filter_state.clear()
+
+    if processed:
+        frame["landmarks"] = processed
+        frame["tracking_state"] = "tracked"
+    else:
+        frame.pop("landmarks", None)
+        frame["tracking_state"] = "idle"
+    frame["vendor_tracking_semantics"] = {
+        "quality": semantics.get("quality", "optimized"),
+        "overlay_mode": semantics.get("overlay_mode", "optimized"),
+        "filter_enabled": bool(semantics.get("filter_enabled", True)),
+        "landmark_count_before": landmark_count_before,
+        "landmark_count_after": len(processed),
+    }
+    return frame
+
+
 def _read_request(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -474,6 +641,8 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     source = request.get("source", {}) if isinstance(request.get("source", {}), dict) else {}
     preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
     preview_config = _preview_runtime_config(preview, runtime)
+    tracking_semantics = _tracking_semantics(request)
+    tracking_filter_state: Optional[Dict[str, Any]] = {} if bool(tracking_semantics.get('filter_enabled', True)) else None
     video_path = str(source.get("path", "")).strip()
     tracking_interval = _fps_interval_seconds(runtime.get("tracking_max_fps", _DEFAULT_TRACKING_MAX_FPS), _DEFAULT_TRACKING_MAX_FPS)
     state_interval = _fps_interval_seconds(runtime.get("state_update_max_fps", _DEFAULT_STATE_UPDATE_MAX_FPS), _DEFAULT_STATE_UPDATE_MAX_FPS)
@@ -610,7 +779,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 _write_session_snapshot(session_dir, snapshot)
                 return 1
 
-            inferred = _infer_pose_landmarks(sampled, runtime, inference_session=inference_session)
+            inferred = _infer_pose_landmarks(sampled, runtime, inference_session=inference_session, tracking_semantics=tracking_semantics, filter_state=tracking_filter_state)
             if not bool(inferred.get("ok", False)):
                 snapshot = _continuous_error_snapshot(request, {
                     "error_info": inferred.get("error_info", {
@@ -1211,9 +1380,10 @@ def _infer_pose_landmarks_with_mediapipe(runtime: Dict[str, Any], frame_bgr: Any
     }
 
 
-def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], inference_session: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], inference_session: Optional[Dict[str, Any]] = None, tracking_semantics: Optional[Dict[str, Any]] = None, filter_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     raw_tracking_frame = sampled.get("raw_tracking_frame", {}).copy()
     notes = list(sampled.get("notes", []))
+    semantics = tracking_semantics or {"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}
 
     fixture_error = sampled.get("fixture_inference_error")
     if isinstance(fixture_error, dict):
@@ -1228,6 +1398,11 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], infe
         landmarks = raw_tracking_frame.get("landmarks")
         if isinstance(landmarks, list) and len(landmarks) > 0:
             raw_tracking_frame["tracking_state"] = "tracked"
+            raw_tracking_frame = _apply_tracking_semantics(raw_tracking_frame, semantics, filter_state)
+            semantics_meta = raw_tracking_frame.get("vendor_tracking_semantics", {})
+            notes.append(
+                f"Applied vendor tracking semantics to fixture landmarks: quality={semantics_meta.get('quality', 'optimized')}, filter_enabled={semantics_meta.get('filter_enabled', True)}, kept {semantics_meta.get('landmark_count_after', 0)} of {semantics_meta.get('landmark_count_before', 0)} landmark(s)."
+            )
         else:
             raw_tracking_frame.pop("landmarks", None)
             raw_tracking_frame["tracking_state"] = "idle"
@@ -1266,10 +1441,17 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], infe
     if isinstance(landmarks, list) and landmarks:
         raw_tracking_frame["tracking_state"] = "tracked"
         raw_tracking_frame["landmarks"] = landmarks
+        raw_tracking_frame = _apply_tracking_semantics(raw_tracking_frame, semantics, filter_state)
+        semantics_meta = raw_tracking_frame.get("vendor_tracking_semantics", {})
         notes.append(f"MediaPipe pose inference produced {len(landmarks)} landmark(s) from the sampled frame via {inferred.get('inference_backend', 'mediapipe')}.")
+        notes.append(
+            f"Applied vendor tracking semantics: quality={semantics_meta.get('quality', 'optimized')}, filter_enabled={semantics_meta.get('filter_enabled', True)}, kept {semantics_meta.get('landmark_count_after', 0)} of {semantics_meta.get('landmark_count_before', 0)} landmark(s)."
+        )
     else:
         raw_tracking_frame.pop("landmarks", None)
         raw_tracking_frame["tracking_state"] = "idle"
+        if filter_state is not None:
+            filter_state.clear()
         notes.append(f"MediaPipe pose inference via {inferred.get('inference_backend', 'mediapipe')} found no landmarks in the sampled frame; tracking remains idle.")
 
     if inferred.get("model_asset_path"):
@@ -1385,6 +1567,7 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
     runtime: Dict[str, Any] = selection["runtime"]
     source: Dict[str, Any] = selection["source"]
     preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
+    tracking_semantics = _tracking_semantics(request)
     selected_camera_id = str(selection["selected_camera_id"])
     cameras = selection["cameras"]
     health = selection["health"]
@@ -1411,7 +1594,7 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
             "error_info": error_info,
         }
 
-    inferred = _infer_pose_landmarks(sampled, runtime)
+    inferred = _infer_pose_landmarks(sampled, runtime, tracking_semantics=tracking_semantics, filter_state={} if bool(tracking_semantics.get('filter_enabled', True)) else None)
     if not bool(inferred.get("ok", False)):
         error_info = inferred.get("error_info", {
             "code": "mediapipe_inference_failed",
@@ -1635,6 +1818,8 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
     preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
     preview_config = _preview_runtime_config(preview, runtime)
+    tracking_semantics = _tracking_semantics(request)
+    tracking_filter_state: Optional[Dict[str, Any]] = {} if bool(tracking_semantics.get('filter_enabled', True)) else None
     tracking_interval = _fps_interval_seconds(runtime.get("tracking_max_fps", _DEFAULT_TRACKING_MAX_FPS), _DEFAULT_TRACKING_MAX_FPS)
     state_interval = _fps_interval_seconds(runtime.get("state_update_max_fps", _DEFAULT_STATE_UPDATE_MAX_FPS), _DEFAULT_STATE_UPDATE_MAX_FPS)
     preview_interval = _fps_interval_seconds(preview_config.get("max_fps", _DEFAULT_PREVIEW_MAX_FPS), _DEFAULT_PREVIEW_MAX_FPS)
@@ -1720,7 +1905,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
                 _write_session_snapshot(session_dir, snapshot)
                 return 1
 
-            inferred = _infer_pose_landmarks(sampled, runtime, inference_session=inference_session)
+            inferred = _infer_pose_landmarks(sampled, runtime, inference_session=inference_session, tracking_semantics=tracking_semantics, filter_state=tracking_filter_state)
             if not bool(inferred.get("ok", False)):
                 snapshot = _continuous_error_snapshot(request, {
                     "error_info": inferred.get("error_info", {

@@ -83,6 +83,8 @@ static func vendor_defaults() -> Dictionary:
 			"health_poll_interval_ms": DEFAULT_HEALTH_POLL_INTERVAL_MS,
 			"tracking_max_fps": DEFAULT_TRACKING_MAX_FPS,
 			"state_update_max_fps": DEFAULT_STATE_UPDATE_MAX_FPS,
+			"filter_enabled": true,
+			"no_filter": false,
 			"preview_enabled": true,
 			"preview_max_fps": DEFAULT_PREVIEW_MAX_FPS,
 			"preview_width": DEFAULT_PREVIEW_WIDTH,
@@ -99,6 +101,13 @@ static func normalize_public_config(config: Dictionary = {}) -> Dictionary:
 	var normalized := public_defaults()
 	_deep_merge(normalized, config)
 	normalized["backend"] = BACKEND_ID
+	normalized["tracking"]["quality"] = _normalize_tracking_quality(
+		normalized.get("tracking", {}).get("quality", DEFAULT_TRACKING_QUALITY),
+		normalized.get("tracking", {}).get("overlay_mode", DEFAULT_OVERLAY_MODE)
+	)
+	normalized["tracking"]["overlay_mode"] = _normalize_overlay_mode(
+		normalized.get("tracking", {}).get("overlay_mode", DEFAULT_OVERLAY_MODE)
+	)
 	normalized["tracking"]["max_fps"] = _normalize_nonnegative_int(
 		normalized.get("tracking", {}).get("max_fps", DEFAULT_TRACKING_MAX_FPS),
 		DEFAULT_TRACKING_MAX_FPS
@@ -143,6 +152,16 @@ static func make_vendor_runtime_config(public_config: Dictionary = {}) -> Dictio
 	var incoming_runtime: Dictionary = public_config.get("runtime", {}) if public_config.get("runtime", {}) is Dictionary else {}
 
 	runtime["model_complexity"] = _normalize_model_complexity(runtime.get("model_complexity", DEFAULT_MODEL_COMPLEXITY))
+	tracking["quality"] = _normalize_tracking_quality(
+		tracking.get("quality", DEFAULT_TRACKING_QUALITY),
+		tracking.get("overlay_mode", DEFAULT_OVERLAY_MODE)
+	)
+	tracking["overlay_mode"] = _normalize_overlay_mode(tracking.get("overlay_mode", DEFAULT_OVERLAY_MODE))
+	if incoming_runtime.has("no_filter"):
+		runtime["filter_enabled"] = not bool(incoming_runtime.get("no_filter", false))
+	else:
+		runtime["filter_enabled"] = bool(runtime.get("filter_enabled", true))
+	runtime["no_filter"] = not bool(runtime.get("filter_enabled", true))
 	runtime["tracking_max_fps"] = _normalize_nonnegative_int(
 		runtime.get("tracking_max_fps", tracking.get("max_fps", DEFAULT_TRACKING_MAX_FPS)),
 		DEFAULT_TRACKING_MAX_FPS
@@ -216,6 +235,37 @@ static func _normalize_quality(value: Variant, default_value: int) -> int:
 	if parsed < 1 or parsed > 100:
 		return default_value
 	return parsed
+
+static func _normalize_tracking_quality(value: Variant, overlay_mode: Variant = DEFAULT_OVERLAY_MODE) -> String:
+	var normalized := str(value).strip_edges().to_lower()
+	match normalized:
+		"simple", "optimized":
+			return "optimized"
+		"full":
+			return "full"
+		"raw":
+			return "full"
+		"off":
+			return _normalize_tracking_quality(DEFAULT_TRACKING_QUALITY, DEFAULT_OVERLAY_MODE)
+		_:
+			var overlay_normalized := str(overlay_mode).strip_edges().to_lower()
+			if overlay_normalized == "full":
+				return "full"
+			if ["simple", "optimized"].has(overlay_normalized):
+				return "optimized"
+			return DEFAULT_TRACKING_QUALITY
+
+static func _normalize_overlay_mode(value: Variant) -> String:
+	var normalized := str(value).strip_edges().to_lower()
+	match normalized:
+		"full":
+			return "full"
+		"simple", "optimized":
+			return "optimized"
+		"off", "none", "hidden":
+			return "off"
+		_:
+			return DEFAULT_OVERLAY_MODE
 
 static func _deep_merge(base: Dictionary, incoming: Dictionary) -> void:
 	for key in incoming.keys():

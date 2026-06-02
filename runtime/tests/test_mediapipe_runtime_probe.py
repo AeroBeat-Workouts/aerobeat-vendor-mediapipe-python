@@ -212,7 +212,7 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
                     "AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": json.dumps({
                         str(video_path): {
                             "sequence": [
-                                {"width": 960, "height": 540, "timestamp_ms": 101, "landmarks": [{"id": 4, "x": 0.2, "y": 0.3, "z": -0.1, "visibility": 0.9}]},
+                                {"width": 960, "height": 540, "timestamp_ms": 101, "landmarks": [{"id": 15, "x": 0.2, "y": 0.3, "z": -0.1, "visibility": 0.9}]},
                                 {"width": 960, "height": 540, "timestamp_ms": 202}
                             ]
                         }
@@ -232,7 +232,7 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertEqual(first["raw_tracking_frame"]["source_id"], str(video_path))
             self.assertEqual(first["raw_tracking_frame"]["tracking_state"], "tracked")
             self.assertEqual(first["raw_tracking_frame"]["frame_size"], {"x": 960, "y": 540})
-            self.assertEqual(first["raw_tracking_frame"]["landmarks"][0]["id"], 4)
+            self.assertEqual(first["raw_tracking_frame"]["landmarks"][0]["id"], 15)
 
             second = probe._sample_once(request, sample_index=1, dynamic_timestamp=False)
             self.assertTrue(second["ok"])
@@ -333,6 +333,88 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(any(duration < 0.05 for duration in sleeps), sleeps)
             self.assertFalse(any(abs(duration - 0.25) < 0.001 for duration in sleeps), sleeps)
+
+    def test_sample_once_reduces_optimized_landmark_sets_instead_of_only_hiding_them(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            camera_path = Path(temp_dir) / "video0"
+            camera_path.write_bytes(b"fixture")
+            request = {
+                "operation": "startup",
+                "runtime": {
+                    "working_directory": temp_dir,
+                    "environment": {
+                        "AEROBEAT_CAMERA_ROOT": temp_dir,
+                        "AEROBEAT_CAMERA_PATTERN": "video*",
+                        "AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": json.dumps({
+                            str(camera_path): {
+                                "width": 1280,
+                                "height": 720,
+                                "timestamp_ms": 111,
+                                "landmarks": [
+                                    {"id": 0, "x": 0.20, "y": 0.40, "z": -0.10, "visibility": 0.90},
+                                    {"id": 2, "x": 0.21, "y": 0.39, "z": -0.10, "visibility": 0.85},
+                                    {"id": 11, "x": 0.35, "y": 0.50, "z": -0.08, "visibility": 0.95},
+                                    {"id": 15, "x": 0.42, "y": 0.58, "z": -0.12, "visibility": 0.93},
+                                ],
+                            }
+                        })
+                    },
+                },
+                "tracking": {"quality": "optimized", "overlay_mode": "optimized"},
+                "source": {"kind": "live_camera", "camera_id": str(camera_path)},
+                "preview": {"enabled": True},
+            }
+            result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+        self.assertTrue(result["ok"])
+        landmark_ids = [landmark["id"] for landmark in result["raw_tracking_frame"]["landmarks"]]
+        self.assertEqual(landmark_ids, [0, 11, 15])
+        semantics = result["raw_tracking_frame"]["vendor_tracking_semantics"]
+        self.assertEqual(semantics["quality"], "optimized")
+        self.assertEqual(semantics["landmark_count_before"], 4)
+        self.assertEqual(semantics["landmark_count_after"], 3)
+
+    def test_fixture_inference_path_applies_filter_state_when_enabled(self):
+        semantics = {"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}
+        filter_state = {}
+        first = probe._infer_pose_landmarks(
+            {
+                "fixture_used": True,
+                "raw_tracking_frame": {
+                    "timestamp_ms": 100,
+                    "landmarks": [{"id": 15, "x": 0.0, "y": 0.5, "z": -0.1, "visibility": 0.9}],
+                },
+            },
+            {},
+            tracking_semantics=semantics,
+            filter_state=filter_state,
+        )
+        second = probe._infer_pose_landmarks(
+            {
+                "fixture_used": True,
+                "raw_tracking_frame": {
+                    "timestamp_ms": 200,
+                    "landmarks": [{"id": 15, "x": 1.0, "y": 0.5, "z": -0.1, "visibility": 0.9}],
+                },
+            },
+            {},
+            tracking_semantics=semantics,
+            filter_state=filter_state,
+        )
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(first["raw_tracking_frame"]["landmarks"][0]["x"], 0.0)
+        self.assertLess(second["raw_tracking_frame"]["landmarks"][0]["x"], 1.0)
+        self.assertGreater(second["raw_tracking_frame"]["landmarks"][0]["x"], 0.0)
+
+    def test_tracking_semantics_honors_legacy_no_filter_flag(self):
+        semantics = probe._tracking_semantics({
+            "runtime": {"no_filter": True},
+            "tracking": {"quality": "simple", "overlay_mode": "simple"},
+        })
+        self.assertEqual(semantics["quality"], "optimized")
+        self.assertEqual(semantics["overlay_mode"], "optimized")
+        self.assertFalse(semantics["filter_enabled"])
+        self.assertEqual(semantics["point_mode"], "reduced")
 
 
 if __name__ == "__main__":
