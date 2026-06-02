@@ -25,6 +25,61 @@ class _FakeCv2:
         return frame_bgr
 
 
+class _FakeNegotiatedCapture:
+    def __init__(self, profile):
+        self.profile = profile
+        self._released = False
+
+    def isOpened(self):
+        return bool(self.profile.get("opened", True))
+
+    def read(self):
+        if not self.isOpened():
+            return (False, None)
+        width = int(self.profile.get("width", 0))
+        height = int(self.profile.get("height", 0))
+        frame = types.SimpleNamespace(shape=(height, width, 3))
+        return (True, frame)
+
+    def release(self):
+        self._released = True
+
+    def set(self, _prop, _value):
+        return True
+
+    def get(self, prop):
+        if prop == _FakeNegotiationCv2.CAP_PROP_FRAME_WIDTH:
+            return float(self.profile.get("width", 0))
+        if prop == _FakeNegotiationCv2.CAP_PROP_FRAME_HEIGHT:
+            return float(self.profile.get("height", 0))
+        if prop == _FakeNegotiationCv2.CAP_PROP_FPS:
+            return float(self.profile.get("fps", 0.0))
+        if prop == _FakeNegotiationCv2.CAP_PROP_FOURCC:
+            fourcc = str(self.profile.get("fourcc", "") or "")
+            return float(_FakeNegotiationCv2.VideoWriter_fourcc(*fourcc[:4])) if fourcc else 0.0
+        return 0.0
+
+
+class _FakeNegotiationCv2(_FakeCv2):
+    CAP_V4L2 = 200
+    CAP_PROP_FRAME_WIDTH = 3
+    CAP_PROP_FRAME_HEIGHT = 4
+    CAP_PROP_FPS = 5
+    CAP_PROP_FOURCC = 6
+    PROFILES = {}
+
+    @staticmethod
+    def VideoWriter_fourcc(*chars):
+        padded = list(chars[:4]) + ["\0"] * max(0, 4 - len(chars[:4]))
+        return sum(ord(ch) << (8 * idx) for idx, ch in enumerate(padded[:4]))
+
+    @classmethod
+    def VideoCapture(cls, source, backend=None):
+        backend_name = "CAP_V4L2" if backend == cls.CAP_V4L2 else "default"
+        profile = cls.PROFILES.get((source, backend_name), {"opened": False})
+        return _FakeNegotiatedCapture(profile)
+
+
 class _FakeLandmark:
     def __init__(self, x, y, z, visibility):
         self.x = x
@@ -333,6 +388,76 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(any(duration < 0.05 for duration in sleeps), sleeps)
             self.assertFalse(any(abs(duration - 0.25) < 0.001 for duration in sleeps), sleeps)
+
+    def test_sample_once_prefers_v4l2_mjpg_and_reports_negotiated_mode_truthfully(self):
+        request = {
+            "operation": "startup",
+            "runtime": {
+                "working_directory": os.getcwd(),
+                "live_camera_width": 1280,
+                "live_camera_height": 720,
+                "live_camera_fps": 30,
+                "live_camera_fourcc": "MJPG",
+                "pose_landmarker_model_path": "unused-for-fake-legacy-path",
+                "environment": {
+                    "AEROBEAT_CAMERA_ROOT": "/dev",
+                    "AEROBEAT_CAMERA_PATTERN": "video0",
+                },
+            },
+            "tracking": {"quality": "full", "overlay_mode": "full"},
+            "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
+            "preview": {"enabled": True},
+        }
+        _FakeNegotiationCv2.PROFILES = {
+            ("/dev/video0", "CAP_V4L2"): {"opened": True, "width": 1280, "height": 720, "fps": 30.0, "fourcc": "MJPG"},
+            ("/dev/video0", "default"): {"opened": True, "width": 1920, "height": 1080, "fps": 5.0, "fourcc": "YUYV"},
+        }
+        with mock.patch.object(probe.platform, "system", return_value="Linux"):
+            with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
+                result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+        self.assertTrue(result["ok"])
+        capture_mode = result["health"]["capture_mode"]
+        self.assertEqual(capture_mode["backend"], "CAP_V4L2")
+        self.assertEqual(capture_mode["requested"]["fourcc"], "MJPG")
+        self.assertEqual(capture_mode["actual"]["fourcc"], "MJPG")
+        self.assertEqual(capture_mode["actual"]["width"], 1280)
+        self.assertEqual(capture_mode["actual"]["height"], 720)
+        self.assertTrue(any("requested mode 1280x720@30 MJPG" in note for note in result["health"]["notes"]))
+
+    def test_sample_once_falls_back_when_preferred_linux_mode_is_not_really_negotiated(self):
+        request = {
+            "operation": "startup",
+            "runtime": {
+                "working_directory": os.getcwd(),
+                "live_camera_width": 1280,
+                "live_camera_height": 720,
+                "live_camera_fps": 30,
+                "live_camera_fourcc": "MJPG",
+                "pose_landmarker_model_path": "unused-for-fake-legacy-path",
+                "environment": {
+                    "AEROBEAT_CAMERA_ROOT": "/dev",
+                    "AEROBEAT_CAMERA_PATTERN": "video0",
+                },
+            },
+            "tracking": {"quality": "full", "overlay_mode": "full"},
+            "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
+            "preview": {"enabled": True},
+        }
+        _FakeNegotiationCv2.PROFILES = {
+            ("/dev/video0", "CAP_V4L2"): {"opened": True, "width": 1920, "height": 1080, "fps": 5.0, "fourcc": "YUYV"},
+            ("/dev/video0", "default"): {"opened": True, "width": 1280, "height": 720, "fps": 30.0, "fourcc": "MJPG"},
+        }
+        with mock.patch.object(probe.platform, "system", return_value="Linux"):
+            with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
+                result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+        self.assertTrue(result["ok"])
+        capture_mode = result["health"]["capture_mode"]
+        self.assertEqual(capture_mode["backend"], "default")
+        self.assertEqual(capture_mode["actual"]["width"], 1280)
+        self.assertEqual(capture_mode["actual"]["height"], 720)
+        self.assertEqual(capture_mode["actual"]["fps"], 30.0)
+        self.assertEqual(capture_mode["actual"]["fourcc"], "MJPG")
+        self.assertTrue(any("actual mode is 1280x720@30.000 MJPG" in note for note in result["health"]["notes"]))
 
     def test_sample_once_reduces_optimized_landmark_sets_instead_of_only_hiding_them(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -68,6 +68,11 @@ Continuous runtime cadence and preview behavior are now controlled by the vendor
 - `runtime.preview_max_fps` — preview image update cap (default `30`)
 - `runtime.preview_width` / `runtime.preview_height` — preview downscale bounds (defaults `960x540`)
 - `runtime.preview_quality` — JPEG quality for preview frame writes (default `75`)
+- `runtime.live_camera_width` / `runtime.live_camera_height` — requested live-camera capture mode before inference (defaults mirror preview bounds)
+- `runtime.live_camera_fps` — requested live-camera capture FPS during negotiation (defaults mirror tracking max FPS)
+- `runtime.live_camera_fourcc` — preferred live-camera FOURCC for Linux/OpenCV negotiation (`MJPG` by default)
+
+On Linux `/dev/video*` live-camera sessions the runtime now prefers `cv2.CAP_V4L2`, explicitly requests the configured width/height/fps/FOURCC, and reports the truthful negotiated mode back through runtime health under `health.capture_mode` plus human-readable health notes. If the preferred mode is not actually honored, the runtime falls back to the best readable capture path it can prove instead of pretending the requested mode succeeded.
 
 If the host only exposes the tasks-era MediaPipe API and no usable model asset is available, the runtime fails honestly with `mediapipe_model_missing` instead of pretending inference ran.
 

@@ -7,7 +7,7 @@ import os
 import platform
 import sys
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 _DEFAULT_MODEL_COMPLEXITY = 1
 _MODEL_FILENAMES = {
@@ -442,6 +442,341 @@ def _camera_device_index(camera_id: str) -> Optional[int]:
     return None
 
 
+def _live_camera_capture_request(runtime: Dict[str, Any]) -> Dict[str, Any]:
+    requested_width = _normalize_positive_int(runtime.get("live_camera_width", runtime.get("preview_width", _DEFAULT_PREVIEW_WIDTH)), _DEFAULT_PREVIEW_WIDTH)
+    requested_height = _normalize_positive_int(runtime.get("live_camera_height", runtime.get("preview_height", _DEFAULT_PREVIEW_HEIGHT)), _DEFAULT_PREVIEW_HEIGHT)
+    requested_fps = _normalized_fps_cap(runtime.get("live_camera_fps", runtime.get("tracking_max_fps", _DEFAULT_TRACKING_MAX_FPS)), _DEFAULT_TRACKING_MAX_FPS)
+    preferred_fourcc = str(runtime.get("live_camera_fourcc", "MJPG") or "").strip().upper()
+    if preferred_fourcc == "":
+        preferred_fourcc = "MJPG"
+    return {
+        "width": requested_width,
+        "height": requested_height,
+        "fps": requested_fps,
+        "preferred_fourcc": preferred_fourcc,
+    }
+
+
+def _preferred_live_camera_backend_name(cv2: Any, camera_id: str) -> str:
+    if platform.system() == "Linux" and _camera_device_index(camera_id) is not None and hasattr(cv2, "CAP_V4L2"):
+        return "CAP_V4L2"
+    return "default"
+
+
+def _capture_backend_value(cv2: Any, backend_name: str) -> Optional[int]:
+    if backend_name == "CAP_V4L2" and hasattr(cv2, "CAP_V4L2"):
+        return int(getattr(cv2, "CAP_V4L2"))
+    return None
+
+
+def _safe_capture_set(capture: Any, prop: Any, value: Any) -> bool:
+    try:
+        return bool(capture.set(prop, value))
+    except Exception:
+        return False
+
+
+def _safe_capture_get(capture: Any, prop: Any, default: float = 0.0) -> float:
+    try:
+        value = capture.get(prop)
+    except Exception:
+        return default
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _encode_fourcc(cv2: Any, fourcc: str) -> Optional[int]:
+    if fourcc == "" or hasattr(cv2, "VideoWriter_fourcc") == False:
+        return None
+    try:
+        return int(cv2.VideoWriter_fourcc(*fourcc[:4]))
+    except Exception:
+        return None
+
+
+def _decode_fourcc(value: float) -> str:
+    try:
+        parsed = int(round(value))
+    except (TypeError, ValueError):
+        return ""
+    if parsed <= 0:
+        return ""
+    chars: List[str] = []
+    for shift in range(4):
+        code = (parsed >> (8 * shift)) & 0xFF
+        if code == 0:
+            continue
+        chars.append(chr(code))
+    decoded = "".join(chars)
+    return decoded if decoded.isprintable() else ""
+
+
+def _live_camera_capture_attempts(cv2: Any, camera_id: str, runtime: Dict[str, Any]) -> List[Dict[str, Any]]:
+    device_index = _camera_device_index(camera_id)
+    preferred_backend = _preferred_live_camera_backend_name(cv2, camera_id)
+    preferred_fourcc = _live_camera_capture_request(runtime)["preferred_fourcc"]
+    attempts: List[Dict[str, Any]] = []
+
+    def _append(capture_source: Any, source_label: str, backend_name: str, requested_fourcc: str) -> None:
+        candidate = {
+            "capture_source": capture_source,
+            "source_label": source_label,
+            "backend_name": backend_name,
+            "requested_fourcc": requested_fourcc,
+        }
+        if candidate not in attempts:
+            attempts.append(candidate)
+
+    if preferred_backend == "CAP_V4L2":
+        _append(camera_id, "device path", "CAP_V4L2", preferred_fourcc)
+        _append(camera_id, "device path", "CAP_V4L2", "YUYV")
+        _append(camera_id, "device path", "CAP_V4L2", "")
+        if device_index is not None:
+            _append(device_index, f"device index fallback {device_index}", "CAP_V4L2", preferred_fourcc)
+            _append(device_index, f"device index fallback {device_index}", "CAP_V4L2", "")
+
+    _append(camera_id, "device path", "default", preferred_fourcc)
+    _append(camera_id, "device path", "default", "")
+    if device_index is not None:
+        _append(device_index, f"device index fallback {device_index}", "default", preferred_fourcc)
+        _append(device_index, f"device index fallback {device_index}", "default", "")
+
+    return attempts
+
+
+def _open_opencv_capture(cv2: Any, capture_source: Any, backend_name: str) -> Any:
+    backend_value = _capture_backend_value(cv2, backend_name)
+    if backend_value is None:
+        return cv2.VideoCapture(capture_source)
+    return cv2.VideoCapture(capture_source, backend_value)
+
+
+def _shape_dimensions(frame: Any) -> Tuple[int, int]:
+    shape = getattr(frame, "shape", None)
+    if shape is None or len(shape) < 2:
+        return (0, 0)
+    return (int(shape[1]), int(shape[0]))
+
+
+def _actual_live_camera_mode(cv2: Any, capture: Any, frame: Any) -> Dict[str, Any]:
+    width, height = _shape_dimensions(frame)
+    if width <= 0 and hasattr(cv2, "CAP_PROP_FRAME_WIDTH"):
+        width = int(round(_safe_capture_get(capture, cv2.CAP_PROP_FRAME_WIDTH, 0.0)))
+    if height <= 0 and hasattr(cv2, "CAP_PROP_FRAME_HEIGHT"):
+        height = int(round(_safe_capture_get(capture, cv2.CAP_PROP_FRAME_HEIGHT, 0.0)))
+    fps = _safe_capture_get(capture, getattr(cv2, "CAP_PROP_FPS", -1), 0.0) if hasattr(cv2, "CAP_PROP_FPS") else 0.0
+    fourcc = _decode_fourcc(_safe_capture_get(capture, getattr(cv2, "CAP_PROP_FOURCC", -1), 0.0)) if hasattr(cv2, "CAP_PROP_FOURCC") else ""
+    return {
+        "width": max(width, 0),
+        "height": max(height, 0),
+        "fps": round(fps, 3) if fps > 0.0 else 0.0,
+        "fourcc": fourcc,
+    }
+
+
+def _live_camera_negotiation_result(camera_id: str, runtime: Dict[str, Any], attempt: Dict[str, Any], actual_mode: Dict[str, Any]) -> Dict[str, Any]:
+    requested = _live_camera_capture_request(runtime)
+    requested_fourcc = str(attempt.get("requested_fourcc", "") or "").strip().upper()
+    actual_fourcc = str(actual_mode.get("fourcc", "") or "").strip().upper()
+    requested_fps = int(requested["fps"])
+    actual_fps = float(actual_mode.get("fps", 0.0) or 0.0)
+    width_matches = int(actual_mode.get("width", 0)) == int(requested["width"])
+    height_matches = int(actual_mode.get("height", 0)) == int(requested["height"])
+    fps_matches = requested_fps <= 0 or (actual_fps > 0.0 and abs(actual_fps - float(requested_fps)) <= max(1.0, float(requested_fps) * 0.2))
+    fourcc_matches = requested_fourcc == "" or actual_fourcc == requested_fourcc
+    backend_name = str(attempt.get("backend_name", "default"))
+    preferred_backend_name = "CAP_V4L2" if platform.system() == "Linux" and _camera_device_index(camera_id) is not None else "default"
+    score = 0
+    if backend_name == preferred_backend_name:
+        score += 25
+    if width_matches:
+        score += 50
+    if height_matches:
+        score += 50
+    if fps_matches:
+        score += 40
+    if fourcc_matches:
+        score += 20
+    if actual_fps > 0.0:
+        score += min(10, int(actual_fps))
+    return {
+        "camera_id": camera_id,
+        "backend": backend_name,
+        "source_label": str(attempt.get("source_label", "device path")),
+        "capture_source": attempt.get("capture_source"),
+        "requested": {
+            "width": int(requested["width"]),
+            "height": int(requested["height"]),
+            "fps": requested_fps,
+            "fourcc": requested_fourcc,
+        },
+        "actual": {
+            "width": int(actual_mode.get("width", 0)),
+            "height": int(actual_mode.get("height", 0)),
+            "fps": actual_fps,
+            "fourcc": actual_fourcc,
+        },
+        "requested_fourcc_applied": requested_fourcc != "" and fourcc_matches,
+        "matched": {
+            "width": width_matches,
+            "height": height_matches,
+            "fps": fps_matches,
+            "fourcc": fourcc_matches,
+        },
+        "preferred_backend": backend_name == preferred_backend_name,
+        "score": score,
+    }
+
+
+def _live_camera_negotiation_note(negotiation: Dict[str, Any]) -> str:
+    requested = negotiation.get("requested", {}) if isinstance(negotiation.get("requested", {}), dict) else {}
+    actual = negotiation.get("actual", {}) if isinstance(negotiation.get("actual", {}), dict) else {}
+    requested_desc = f"{requested.get('width', 0)}x{requested.get('height', 0)}@{requested.get('fps', 0)}"
+    if str(requested.get("fourcc", "")) != "":
+        requested_desc += f" {requested.get('fourcc', '')}"
+    actual_desc = f"{actual.get('width', 0)}x{actual.get('height', 0)}"
+    actual_fps = float(actual.get("fps", 0.0) or 0.0)
+    if actual_fps > 0.0:
+        actual_desc += f"@{actual_fps:.3f}"
+    actual_fourcc = str(actual.get("fourcc", "") or "")
+    if actual_fourcc != "":
+        actual_desc += f" {actual_fourcc}"
+    backend = str(negotiation.get("backend", "default"))
+    source_label = str(negotiation.get("source_label", "device path"))
+    matches = negotiation.get("matched", {}) if isinstance(negotiation.get("matched", {}), dict) else {}
+    if all(bool(matches.get(key, False)) for key in ("width", "height", "fps", "fourcc")):
+        return f"Live camera negotiated requested mode {requested_desc} via {backend}/{source_label}; actual mode is {actual_desc}."
+    return f"Live camera requested mode {requested_desc} via {backend}/{source_label}, but actual mode negotiated as {actual_desc}."
+
+
+def _read_capture_frame(camera_id: str, capture: Any, source_label: str, read_retries: int, retry_sleep_seconds: float) -> Dict[str, Any]:
+    frame = None
+    for attempt in range(read_retries):
+        ok, candidate = capture.read()
+        if ok and candidate is not None:
+            frame = candidate
+            break
+        if attempt < (read_retries - 1):
+            time.sleep(retry_sleep_seconds)
+
+    if frame is None:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "camera_read_failed",
+                "message": f"OpenCV could not read a frame from selected camera '{camera_id}' via {source_label}",
+            },
+        }
+
+    width, height = _shape_dimensions(frame)
+    if width <= 0 or height <= 0:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "camera_frame_invalid",
+                "message": f"OpenCV returned non-positive frame dimensions for selected camera '{camera_id}' via {source_label}",
+            },
+        }
+
+    return {"ok": True, "frame_bgr": frame, "width": width, "height": height}
+
+
+def _select_live_camera_capture_session(camera_id: str, runtime: Dict[str, Any], purpose: str) -> Dict[str, Any]:
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "opencv_unavailable",
+                "message": f"OpenCV import failed while opening camera '{camera_id}': {exc}",
+            },
+        }
+
+    best_session: Optional[Dict[str, Any]] = None
+    last_failure = {
+        "ok": False,
+        "error_info": {
+            "code": "camera_open_failed",
+            "message": f"OpenCV could not open selected camera '{camera_id}' for {purpose}",
+        },
+    }
+
+    requested = _live_camera_capture_request(runtime)
+    attempts = _live_camera_capture_attempts(cv2, camera_id, runtime)
+    for attempt in attempts:
+        capture = _open_opencv_capture(cv2, attempt["capture_source"], str(attempt.get("backend_name", "default")))
+        if not capture.isOpened():
+            try:
+                capture.release()
+            except Exception:
+                pass
+            last_failure = {
+                "ok": False,
+                "error_info": {
+                    "code": "camera_open_failed",
+                    "message": f"OpenCV could not open selected camera '{camera_id}' via {attempt['backend_name']}/{attempt['source_label']} for {purpose}",
+                },
+            }
+            continue
+
+        if hasattr(cv2, "CAP_PROP_FRAME_WIDTH"):
+            _safe_capture_set(capture, cv2.CAP_PROP_FRAME_WIDTH, requested["width"])
+        if hasattr(cv2, "CAP_PROP_FRAME_HEIGHT"):
+            _safe_capture_set(capture, cv2.CAP_PROP_FRAME_HEIGHT, requested["height"])
+        if requested["fps"] > 0 and hasattr(cv2, "CAP_PROP_FPS"):
+            _safe_capture_set(capture, cv2.CAP_PROP_FPS, requested["fps"])
+        encoded_fourcc = _encode_fourcc(cv2, str(attempt.get("requested_fourcc", "")))
+        if encoded_fourcc is not None and hasattr(cv2, "CAP_PROP_FOURCC"):
+            _safe_capture_set(capture, cv2.CAP_PROP_FOURCC, encoded_fourcc)
+
+        read_result = _read_capture_frame(camera_id, capture, f"{attempt['backend_name']}/{attempt['source_label']}", 5, 0.1 if purpose == "sample capture" else 0.02)
+        if not bool(read_result.get("ok", False)):
+            try:
+                capture.release()
+            except Exception:
+                pass
+            last_failure = read_result
+            continue
+
+        actual_mode = _actual_live_camera_mode(cv2, capture, read_result.get("frame_bgr"))
+        negotiation = _live_camera_negotiation_result(camera_id, runtime, attempt, actual_mode)
+        session = {
+            "ok": True,
+            "fixture_only": False,
+            "cv2": cv2,
+            "capture": capture,
+            "source_label": f"{attempt['backend_name']}/{attempt['source_label']}",
+            "capture_negotiation": negotiation,
+            "notes": [_live_camera_negotiation_note(negotiation)],
+            "initial_frame_bgr": read_result.get("frame_bgr"),
+            "initial_frame_width": int(read_result.get("width", 0)),
+            "initial_frame_height": int(read_result.get("height", 0)),
+        }
+        if best_session is None or int(negotiation.get("score", 0)) > int(best_session.get("capture_negotiation", {}).get("score", -1)):
+            if best_session is not None:
+                try:
+                    best_session["capture"].release()
+                except Exception:
+                    pass
+            best_session = session
+        else:
+            try:
+                capture.release()
+            except Exception:
+                pass
+
+        matched = negotiation.get("matched", {}) if isinstance(negotiation.get("matched", {}), dict) else {}
+        if all(bool(matched.get(key, False)) for key in ("width", "height", "fps", "fourcc")):
+            break
+
+    return best_session or last_failure
+
+
 def _capture_frame_with_opencv_source(cv2: Any, camera_id: str, capture_source: Any, source_label: str) -> Dict[str, Any]:
     capture = cv2.VideoCapture(capture_source)
     try:
@@ -454,45 +789,12 @@ def _capture_frame_with_opencv_source(cv2: Any, camera_id: str, capture_source: 
                 },
             }
 
-        frame = None
-        for attempt in range(5):
-            ok, candidate = capture.read()
-            if ok and candidate is not None:
-                frame = candidate
-                break
-            if attempt < 4:
-                time.sleep(0.1)
+        read_result = _read_capture_frame(camera_id, capture, source_label, 5, 0.1)
+        if not bool(read_result.get("ok", False)):
+            return read_result
 
-        if frame is None:
-            return {
-                "ok": False,
-                "error_info": {
-                    "code": "camera_read_failed",
-                    "message": f"OpenCV could not read a frame from selected camera '{camera_id}' via {source_label}",
-                },
-            }
-
-        shape = getattr(frame, "shape", None)
-        if shape is None or len(shape) < 2:
-            return {
-                "ok": False,
-                "error_info": {
-                    "code": "camera_frame_invalid",
-                    "message": f"OpenCV returned an invalid frame shape for selected camera '{camera_id}' via {source_label}",
-                },
-            }
-
-        height = int(shape[0])
-        width = int(shape[1])
-        if width <= 0 or height <= 0:
-            return {
-                "ok": False,
-                "error_info": {
-                    "code": "camera_frame_invalid",
-                    "message": f"OpenCV returned non-positive frame dimensions for selected camera '{camera_id}' via {source_label}",
-                },
-            }
-
+        width = int(read_result.get("width", 0))
+        height = int(read_result.get("height", 0))
         timestamp_ms = _now_ms()
         note = f"Captured one live sample frame from '{camera_id}' with dimensions {width}x{height}."
         if source_label != "device path":
@@ -500,7 +802,7 @@ def _capture_frame_with_opencv_source(cv2: Any, camera_id: str, capture_source: 
 
         return {
             "ok": True,
-            "frame_bgr": frame,
+            "frame_bgr": read_result.get("frame_bgr"),
             "raw_tracking_frame": _raw_tracking_frame_base("live_camera", camera_id, width, height, timestamp_ms),
             "notes": [note],
         }
@@ -521,36 +823,37 @@ def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any], sample_
             }
         return {"ok": True, **fixture_sample}
 
+    capture_session = _select_live_camera_capture_session(camera_id, runtime, "sample capture")
+    if not bool(capture_session.get("ok", False)):
+        return capture_session
+
     try:
-        import cv2  # type: ignore
-    except Exception as exc:
+        frame = capture_session.get("initial_frame_bgr")
+        width = int(capture_session.get("initial_frame_width", 0))
+        height = int(capture_session.get("initial_frame_height", 0))
+        if frame is None or width <= 0 or height <= 0:
+            followup = _read_capture_frame(camera_id, capture_session.get("capture"), str(capture_session.get("source_label", "device path")), 5, 0.1)
+            if not bool(followup.get("ok", False)):
+                return followup
+            frame = followup.get("frame_bgr")
+            width = int(followup.get("width", 0))
+            height = int(followup.get("height", 0))
+
+        timestamp_ms = _now_ms()
+        source_label = str(capture_session.get("source_label", "device path"))
+        note = f"Captured one live sample frame from '{camera_id}' with dimensions {width}x{height}."
+        if source_label != "device path":
+            note = f"Captured one live sample frame from '{camera_id}' with dimensions {width}x{height} via {source_label}."
+        notes = list(capture_session.get("notes", [])) + [note]
         return {
-            "ok": False,
-            "error_info": {
-                "code": "opencv_unavailable",
-                "message": f"OpenCV import failed while sampling camera '{camera_id}': {exc}",
-            },
+            "ok": True,
+            "frame_bgr": frame,
+            "raw_tracking_frame": _raw_tracking_frame_base("live_camera", camera_id, width, height, timestamp_ms),
+            "notes": notes,
+            "capture_negotiation": capture_session.get("capture_negotiation", {}),
         }
-
-    attempts = [(camera_id, "device path")]
-    device_index = _camera_device_index(camera_id)
-    if device_index is not None:
-        attempts.append((device_index, f"device index fallback {device_index}"))
-
-    last_failure = {
-        "ok": False,
-        "error_info": {
-            "code": "camera_sample_failed",
-            "message": f"Failed to capture a sample frame from selected camera '{camera_id}'",
-        },
-    }
-    for capture_source, source_label in attempts:
-        result = _capture_frame_with_opencv_source(cv2, camera_id, capture_source, source_label)
-        if bool(result.get("ok", False)):
-            return result
-        last_failure = result
-
-    return last_failure
+    finally:
+        _close_live_camera_capture_session(capture_session)
 
 
 def _capture_video_file_sample(video_path: str, runtime: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
@@ -943,49 +1246,7 @@ def _open_live_camera_capture_session(camera_id: str, runtime: Dict[str, Any]) -
     fixture_sample = _sample_from_fixture(camera_id, runtime, sample_index=0, dynamic_timestamp=False, source_kind="live_camera")
     if fixture_sample is not None:
         return {"ok": True, "fixture_only": True}
-
-    try:
-        import cv2  # type: ignore
-    except Exception as exc:
-        return {
-            "ok": False,
-            "error_info": {
-                "code": "opencv_unavailable",
-                "message": f"OpenCV import failed while opening camera '{camera_id}': {exc}",
-            },
-        }
-
-    attempts = [(camera_id, "device path")]
-    device_index = _camera_device_index(camera_id)
-    if device_index is not None:
-        attempts.append((device_index, f"device index fallback {device_index}"))
-
-    last_failure = {
-        "ok": False,
-        "error_info": {
-            "code": "camera_open_failed",
-            "message": f"OpenCV could not open selected camera '{camera_id}' for continuous capture",
-        },
-    }
-    for capture_source, source_label in attempts:
-        capture = cv2.VideoCapture(capture_source)
-        if capture.isOpened():
-            return {
-                "ok": True,
-                "fixture_only": False,
-                "cv2": cv2,
-                "capture": capture,
-                "source_label": source_label,
-            }
-        capture.release()
-        last_failure = {
-            "ok": False,
-            "error_info": {
-                "code": "camera_open_failed",
-                "message": f"OpenCV could not open selected camera '{camera_id}' via {source_label} for continuous capture",
-            },
-        }
-    return last_failure
+    return _select_live_camera_capture_session(camera_id, runtime, "continuous capture")
 
 
 def _close_live_camera_capture_session(capture_session: Dict[str, Any]) -> None:
@@ -1022,53 +1283,27 @@ def _capture_live_camera_session_sample(camera_id: str, runtime: Dict[str, Any],
             },
         }
 
-    frame = None
-    for attempt in range(5):
-        ok, candidate = capture.read()
-        if ok and candidate is not None:
-            frame = candidate
-            break
-        if attempt < 4:
-            time.sleep(0.02)
-
-    if frame is None:
-        return {
-            "ok": False,
-            "error_info": {
-                "code": "camera_read_failed",
-                "message": f"OpenCV could not read a frame from selected camera '{camera_id}' via {source_label}",
-            },
-        }
-
-    shape = getattr(frame, "shape", None)
-    if shape is None or len(shape) < 2:
-        return {
-            "ok": False,
-            "error_info": {
-                "code": "camera_frame_invalid",
-                "message": f"OpenCV returned an invalid frame shape for selected camera '{camera_id}' via {source_label}",
-            },
-        }
-
-    height = int(shape[0])
-    width = int(shape[1])
-    if width <= 0 or height <= 0:
-        return {
-            "ok": False,
-            "error_info": {
-                "code": "camera_frame_invalid",
-                "message": f"OpenCV returned non-positive frame dimensions for selected camera '{camera_id}' via {source_label}",
-            },
-        }
+    frame = capture_session.pop("initial_frame_bgr", None)
+    width = int(capture_session.pop("initial_frame_width", 0) or 0)
+    height = int(capture_session.pop("initial_frame_height", 0) or 0)
+    if frame is None or width <= 0 or height <= 0:
+        read_result = _read_capture_frame(camera_id, capture, source_label, 5, 0.02)
+        if not bool(read_result.get("ok", False)):
+            return read_result
+        frame = read_result.get("frame_bgr")
+        width = int(read_result.get("width", 0))
+        height = int(read_result.get("height", 0))
 
     note = f"Captured live session frame {sample_index} from '{camera_id}' with dimensions {width}x{height}."
     if source_label != "device path":
         note = f"Captured live session frame {sample_index} from '{camera_id}' with dimensions {width}x{height} via {source_label}."
+    notes = list(capture_session.get("notes", [])) + [note]
     return {
         "ok": True,
         "frame_bgr": frame,
         "raw_tracking_frame": _raw_tracking_frame_base("live_camera", camera_id, width, height, _now_ms()),
-        "notes": [note],
+        "notes": notes,
+        "capture_negotiation": capture_session.get("capture_negotiation", {}),
     }
 
 
@@ -1618,12 +1853,15 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
 
     raw_tracking_frame = inferred.get("raw_tracking_frame", {}).copy()
     landmarks = raw_tracking_frame.get("landmarks")
+    capture_negotiation = sampled.get("capture_negotiation", {}) if isinstance(sampled.get("capture_negotiation", {}), dict) else {}
     health.update({
         "camera_accessible": True,
         "healthy": True,
         "tracking_active": False,
         "notes": health["notes"] + inferred.get("notes", []),
     })
+    if capture_negotiation:
+        health["capture_mode"] = capture_negotiation
     if isinstance(landmarks, list) and len(landmarks) > 0:
         health["notes"].append(f"Returning {len(landmarks)} raw sampled pose landmark(s).")
     else:
@@ -1887,7 +2125,8 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
                         "healthy": True,
                         "selected_camera_id": selected_camera_id,
                         "selected_camera_label": selected.get("label", selected_camera_id),
-                        "notes": ["Continuous MediaPipe runtime session stopped cleanly."],
+                        "notes": list(capture_session.get("notes", [])) + ["Continuous MediaPipe runtime session stopped cleanly."],
+                        "capture_mode": capture_session.get("capture_negotiation", {}),
                     },
                     "preview_descriptor": last_preview_descriptor.copy(),
                     "raw_tracking_frame": {},
@@ -1926,6 +2165,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
             landmarks = raw_tracking_frame.get("landmarks")
             health = selection.get("health", {}).copy() if isinstance(selection.get("health", {}), dict) else _base_health("startup", runtime)
             base_notes = list(health.get("notes", []))
+            capture_negotiation = capture_session.get("capture_negotiation", {}) if isinstance(capture_session.get("capture_negotiation", {}), dict) else {}
             health.update({
                 "camera_accessible": True,
                 "healthy": True,
@@ -1939,6 +2179,8 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
                 "selected_camera_label": selected.get("label", selected_camera_id),
                 "notes": base_notes + inferred.get("notes", []),
             })
+            if capture_negotiation:
+                health["capture_mode"] = capture_negotiation
             if isinstance(landmarks, list) and len(landmarks) > 0:
                 health["notes"].append(f"Returning {len(landmarks)} raw sampled pose landmark(s).")
             else:

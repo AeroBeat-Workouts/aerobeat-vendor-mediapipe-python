@@ -19,6 +19,7 @@ const DEFAULT_PREVIEW_MAX_FPS := 30
 const DEFAULT_PREVIEW_WIDTH := 960
 const DEFAULT_PREVIEW_HEIGHT := 540
 const DEFAULT_PREVIEW_QUALITY := 75
+const DEFAULT_LIVE_CAMERA_FOURCC := "MJPG"
 
 static func public_defaults() -> Dictionary:
 	return {
@@ -89,7 +90,11 @@ static func vendor_defaults() -> Dictionary:
 			"preview_max_fps": DEFAULT_PREVIEW_MAX_FPS,
 			"preview_width": DEFAULT_PREVIEW_WIDTH,
 			"preview_height": DEFAULT_PREVIEW_HEIGHT,
-			"preview_quality": DEFAULT_PREVIEW_QUALITY
+			"preview_quality": DEFAULT_PREVIEW_QUALITY,
+			"live_camera_width": DEFAULT_PREVIEW_WIDTH,
+			"live_camera_height": DEFAULT_PREVIEW_HEIGHT,
+			"live_camera_fps": DEFAULT_TRACKING_MAX_FPS,
+			"live_camera_fourcc": DEFAULT_LIVE_CAMERA_FOURCC
 		},
 		"diagnostics": {
 			"emit_raw_vendor_payloads": false,
@@ -191,6 +196,21 @@ static func make_vendor_runtime_config(public_config: Dictionary = {}) -> Dictio
 		runtime.get("preview_quality", preview.get("quality", DEFAULT_PREVIEW_QUALITY)),
 		DEFAULT_PREVIEW_QUALITY
 	)
+	runtime["live_camera_width"] = _normalize_positive_int(
+		runtime.get("live_camera_width", runtime.get("preview_width", preview.get("width", DEFAULT_PREVIEW_WIDTH))),
+		DEFAULT_PREVIEW_WIDTH
+	)
+	runtime["live_camera_height"] = _normalize_positive_int(
+		runtime.get("live_camera_height", runtime.get("preview_height", preview.get("height", DEFAULT_PREVIEW_HEIGHT))),
+		DEFAULT_PREVIEW_HEIGHT
+	)
+	runtime["live_camera_fps"] = _normalize_nonnegative_int(
+		runtime.get("live_camera_fps", runtime.get("tracking_max_fps", tracking.get("max_fps", DEFAULT_TRACKING_MAX_FPS))),
+		DEFAULT_TRACKING_MAX_FPS
+	)
+	runtime["live_camera_fourcc"] = str(runtime.get("live_camera_fourcc", DEFAULT_LIVE_CAMERA_FOURCC)).strip_edges().to_upper()
+	if runtime["live_camera_fourcc"] == "":
+		runtime["live_camera_fourcc"] = DEFAULT_LIVE_CAMERA_FOURCC
 	tracking["max_fps"] = int(runtime.get("tracking_max_fps", DEFAULT_TRACKING_MAX_FPS))
 	preview["max_fps"] = int(runtime.get("preview_max_fps", DEFAULT_PREVIEW_MAX_FPS))
 	preview["width"] = int(runtime.get("preview_width", DEFAULT_PREVIEW_WIDTH))
