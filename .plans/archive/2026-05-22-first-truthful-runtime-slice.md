@@ -1,7 +1,7 @@
 # AeroBeat Vendor MediaPipe Python — First Truthful Runtime Slice
 
 **Date:** 2026-05-22  
-**Status:** In Progress  
+**Status:** Stale  
 **Agent:** Cookie 🍪
 
 ---

@@ -1,7 +1,7 @@
 # AeroBeat Vendor MediaPipe Python — Minimal Real Frame Slice
 
 **Date:** 2026-05-22  
-**Status:** Draft  
+**Status:** Stale  
 **Agent:** Cookie 🍪
 
 ---

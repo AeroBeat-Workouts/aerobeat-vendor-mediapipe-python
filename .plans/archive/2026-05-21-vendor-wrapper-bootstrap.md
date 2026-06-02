@@ -1,7 +1,7 @@
 # AeroBeat Vendor MediaPipe Python — Vendor-Wrapper Bootstrap
 
 **Date:** 2026-05-21  
-**Status:** Draft  
+**Status:** Stale  
 **Agent:** Cookie 🍪
 
 ---

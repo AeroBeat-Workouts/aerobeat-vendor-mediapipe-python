@@ -1,7 +1,7 @@
 # AeroBeat Vendor MediaPipe Python — Gesture-Testbed Replay Runtime/Source Slice
 
 **Date:** 2026-05-22  
-**Status:** In Progress  
+**Status:** Stale  
 **Agent:** Cookie 🍪
 
 ---
