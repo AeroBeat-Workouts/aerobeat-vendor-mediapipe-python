@@ -60,6 +60,15 @@ You can also override the model path through vendor runtime config:
 - `runtime.environment.AEROBEAT_MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH`
 - host env `MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH`
 
+Continuous runtime cadence and preview behavior are now controlled by the vendor-owned runtime caps instead of piggybacking on `health_poll_interval_ms`:
+
+- `runtime.tracking_max_fps` — actual live/replay capture + inference cadence (`0` uncapped, default `30`)
+- `runtime.state_update_max_fps` — snapshot/state write cap (default `30`)
+- `runtime.preview_enabled` — enable/disable preview frame writes entirely (default `true`)
+- `runtime.preview_max_fps` — preview image update cap (default `30`)
+- `runtime.preview_width` / `runtime.preview_height` — preview downscale bounds (defaults `960x540`)
+- `runtime.preview_quality` — JPEG quality for preview frame writes (default `75`)
+
 If the host only exposes the tasks-era MediaPipe API and no usable model asset is available, the runtime fails honestly with `mediapipe_model_missing` instead of pretending inference ran.
 
 ## Repository details

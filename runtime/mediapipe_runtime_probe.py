@@ -2,6 +2,7 @@
 import argparse
 import glob
 import json
+import math
 import os
 import platform
 import sys
@@ -20,6 +21,13 @@ _SESSION_PREVIEW_FRAME_FILENAME = "preview_frame.jpg"
 _SESSION_STOP_FILENAME = "stop"
 _SESSION_REQUEST_FILENAME = "request.json"
 
+_DEFAULT_TRACKING_MAX_FPS = 30
+_DEFAULT_STATE_UPDATE_MAX_FPS = 30
+_DEFAULT_PREVIEW_MAX_FPS = 30
+_DEFAULT_PREVIEW_WIDTH = 960
+_DEFAULT_PREVIEW_HEIGHT = 540
+_DEFAULT_PREVIEW_QUALITY = 75
+
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -27,6 +35,54 @@ def _now_iso() -> str:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _normalize_nonnegative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(parsed, 0)
+
+
+def _normalize_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _normalize_jpeg_quality(value: Any, default: int = _DEFAULT_PREVIEW_QUALITY) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(parsed, 1), 100)
+
+
+def _normalized_fps_cap(value: Any, default: int) -> int:
+    return _normalize_nonnegative_int(value, default)
+
+
+def _fps_interval_seconds(value: Any, default: int) -> float:
+    fps = _normalized_fps_cap(value, default)
+    if fps <= 0:
+        return 0.0
+    return 1.0 / float(fps)
+
+
+def _preview_runtime_config(preview: Dict[str, Any], runtime: Dict[str, Any]) -> Dict[str, Any]:
+    enabled = bool(runtime.get("preview_enabled", preview.get("enabled", True)))
+    return {
+        "enabled": enabled,
+        "surface_mode": str(preview.get("surface_mode", "attach")),
+        "flip_horizontal": bool(preview.get("flip_horizontal", True)),
+        "max_fps": _normalized_fps_cap(runtime.get("preview_max_fps", preview.get("max_fps", _DEFAULT_PREVIEW_MAX_FPS)), _DEFAULT_PREVIEW_MAX_FPS),
+        "width": _normalize_positive_int(runtime.get("preview_width", preview.get("width", _DEFAULT_PREVIEW_WIDTH)), _DEFAULT_PREVIEW_WIDTH),
+        "height": _normalize_positive_int(runtime.get("preview_height", preview.get("height", _DEFAULT_PREVIEW_HEIGHT)), _DEFAULT_PREVIEW_HEIGHT),
+        "quality": _normalize_jpeg_quality(runtime.get("preview_quality", preview.get("quality", _DEFAULT_PREVIEW_QUALITY))),
+    }
 
 
 def _read_request(path: str) -> Dict[str, Any]:
@@ -406,7 +462,7 @@ def _replay_eof_snapshot(request: Dict[str, Any], selected_source_id: str, loop_
             "selected_camera_id": selected_source_id,
             "notes": base_notes,
         },
-        "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+        "preview_descriptor": _preview_descriptor(request.get("preview", {}), runtime),
         "raw_tracking_frame": {},
     }
 
@@ -416,14 +472,21 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     _write_json_atomic(_session_request_path(session_dir), request)
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
     source = request.get("source", {}) if isinstance(request.get("source", {}), dict) else {}
+    preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
+    preview_config = _preview_runtime_config(preview, runtime)
     video_path = str(source.get("path", "")).strip()
-    interval_ms = max(30, int(runtime.get("health_poll_interval_ms", 250)))
+    tracking_interval = _fps_interval_seconds(runtime.get("tracking_max_fps", _DEFAULT_TRACKING_MAX_FPS), _DEFAULT_TRACKING_MAX_FPS)
+    state_interval = _fps_interval_seconds(runtime.get("state_update_max_fps", _DEFAULT_STATE_UPDATE_MAX_FPS), _DEFAULT_STATE_UPDATE_MAX_FPS)
+    preview_interval = _fps_interval_seconds(preview_config.get("max_fps", _DEFAULT_PREVIEW_MAX_FPS), _DEFAULT_PREVIEW_MAX_FPS)
     loop_started_ms = _now_ms()
     sample_index = 0
     fixture_map = _sample_fixture_map(runtime)
     use_fixture_sequence = isinstance(fixture_map.get(video_path), dict)
     start_time_sec = max(0.0, float(source.get("start_time_sec", 0.0) or 0.0))
     duration_sec = 0.0
+    last_state_write_at: Optional[float] = None
+    last_preview_write_at: Optional[float] = None
+    last_preview_descriptor = _preview_descriptor(preview, runtime)
 
     capture = None
     cv2 = None
@@ -459,8 +522,26 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
         if start_time_sec > 0.0:
             capture.set(cv2.CAP_PROP_POS_MSEC, start_time_sec * 1000.0)
 
+    inference_session: Optional[Dict[str, Any]] = None
+    if not use_fixture_sequence:
+        inference_session = _create_inference_session(runtime)
+        if not bool(inference_session.get("ok", False)):
+            snapshot = _continuous_error_snapshot(request, {
+                "error_info": inference_session.get("error_info", {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"Failed to initialize continuous pose inference for replay source '{video_path}'",
+                }),
+                "selected_camera_id": video_path,
+                "health": {"camera_accessible": True},
+            }, sample_index, loop_started_ms)
+            _write_session_snapshot(session_dir, snapshot)
+            if capture is not None:
+                capture.release()
+            return 1
+
     try:
         while True:
+            iteration_started_at = time.monotonic()
             if os.path.exists(_session_stop_path(session_dir)):
                 shutdown_snapshot = {
                     "ok": True,
@@ -478,7 +559,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                         "selected_camera_id": video_path,
                         "notes": [f"Replay session for '{video_path}' stopped cleanly."],
                     },
-                    "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+                    "preview_descriptor": last_preview_descriptor.copy(),
                     "playback_status": _playback_status(video_path, start_time_sec, duration_sec, "paused", True),
                     "raw_tracking_frame": {},
                 }
@@ -488,13 +569,16 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
             if use_fixture_sequence:
                 sampled = _capture_video_file_sample(video_path, runtime, sample_index=sample_index, dynamic_timestamp=True)
                 if not bool(sampled.get("ok", False)) and sampled.get("error_info", {}).get("code") == "video_file_eof":
-                    _write_session_snapshot(session_dir, _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index))
+                    eof_snapshot = _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index)
+                    eof_snapshot["preview_descriptor"] = last_preview_descriptor.copy()
+                    _write_session_snapshot(session_dir, eof_snapshot)
                     return 0
             else:
                 assert capture is not None
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     eof_snapshot = _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index)
+                    eof_snapshot["preview_descriptor"] = last_preview_descriptor.copy()
                     eof_snapshot["playback_status"] = _playback_status(video_path, duration_sec, duration_sec, "ended", True)
                     _write_session_snapshot(session_dir, eof_snapshot)
                     return 0
@@ -526,7 +610,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 _write_session_snapshot(session_dir, snapshot)
                 return 1
 
-            inferred = _infer_pose_landmarks(sampled, runtime)
+            inferred = _infer_pose_landmarks(sampled, runtime, inference_session=inference_session)
             if not bool(inferred.get("ok", False)):
                 snapshot = _continuous_error_snapshot(request, {
                     "error_info": inferred.get("error_info", {
@@ -567,19 +651,37 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
             current_time_sec = start_time_sec
             if capture is not None and cv2 is not None:
                 current_time_sec = max(start_time_sec, float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0)
-            preview_descriptor = _with_preview_frame(session_dir, request.get("preview", {}), sampled.get("frame_bgr"))
-            _write_session_snapshot(session_dir, {
+
+            sampled_snapshot = {
                 "ok": True,
                 "cameras": _enumerate_cameras(runtime),
                 "selected_camera_id": video_path,
                 "health": health,
-                "preview_descriptor": preview_descriptor,
+                "preview_descriptor": last_preview_descriptor.copy(),
                 "playback_status": _playback_status(video_path, current_time_sec, duration_sec),
                 "raw_tracking_frame": raw_tracking_frame,
-            })
+                "frame_bgr": sampled.get("frame_bgr"),
+            }
+
+            now = time.monotonic()
+            should_write_state = last_state_write_at is None or state_interval <= 0.0 or (now - last_state_write_at) >= state_interval
+            include_preview = bool(preview_config.get("enabled", True)) and should_write_state and (last_preview_write_at is None or preview_interval <= 0.0 or (now - last_preview_write_at) >= preview_interval)
+            if should_write_state:
+                snapshot = _continuous_success_snapshot(request, sampled_snapshot, sample_index, loop_started_ms, session_dir, include_preview_frame=include_preview, existing_preview_descriptor=last_preview_descriptor)
+                last_preview_descriptor = snapshot.get("preview_descriptor", last_preview_descriptor).copy()
+                _write_session_snapshot(session_dir, snapshot)
+                last_state_write_at = now
+                if include_preview:
+                    last_preview_write_at = now
+
             sample_index += 1
-            time.sleep(float(interval_ms) / 1000.0)
+            if tracking_interval > 0.0:
+                sleep_seconds = max(0.0, tracking_interval - (time.monotonic() - iteration_started_at))
+                if sleep_seconds > 0.0:
+                    time.sleep(sleep_seconds)
     finally:
+        if inference_session is not None:
+            _close_inference_session(inference_session)
         if capture is not None:
             capture.release()
 
@@ -666,6 +768,316 @@ def _resolve_pose_landmarker_model_path(runtime: Dict[str, Any]) -> str:
             return resolved
 
     return ""
+
+
+def _open_live_camera_capture_session(camera_id: str, runtime: Dict[str, Any]) -> Dict[str, Any]:
+    fixture_sample = _sample_from_fixture(camera_id, runtime, sample_index=0, dynamic_timestamp=False, source_kind="live_camera")
+    if fixture_sample is not None:
+        return {"ok": True, "fixture_only": True}
+
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "opencv_unavailable",
+                "message": f"OpenCV import failed while opening camera '{camera_id}': {exc}",
+            },
+        }
+
+    attempts = [(camera_id, "device path")]
+    device_index = _camera_device_index(camera_id)
+    if device_index is not None:
+        attempts.append((device_index, f"device index fallback {device_index}"))
+
+    last_failure = {
+        "ok": False,
+        "error_info": {
+            "code": "camera_open_failed",
+            "message": f"OpenCV could not open selected camera '{camera_id}' for continuous capture",
+        },
+    }
+    for capture_source, source_label in attempts:
+        capture = cv2.VideoCapture(capture_source)
+        if capture.isOpened():
+            return {
+                "ok": True,
+                "fixture_only": False,
+                "cv2": cv2,
+                "capture": capture,
+                "source_label": source_label,
+            }
+        capture.release()
+        last_failure = {
+            "ok": False,
+            "error_info": {
+                "code": "camera_open_failed",
+                "message": f"OpenCV could not open selected camera '{camera_id}' via {source_label} for continuous capture",
+            },
+        }
+    return last_failure
+
+
+def _close_live_camera_capture_session(capture_session: Dict[str, Any]) -> None:
+    capture = capture_session.get("capture")
+    if capture is None:
+        return
+    try:
+        capture.release()
+    except Exception:
+        pass
+
+
+def _capture_live_camera_session_sample(camera_id: str, runtime: Dict[str, Any], capture_session: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
+    fixture_sample = _sample_from_fixture(camera_id, runtime, sample_index=sample_index, dynamic_timestamp=dynamic_timestamp, source_kind="live_camera")
+    if fixture_sample is not None:
+        if fixture_sample.get("fixture_eof"):
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "fixture_sequence_exhausted",
+                    "message": f"Fixture sequence exhausted for live camera '{camera_id}'",
+                },
+            }
+        return {"ok": True, **fixture_sample}
+
+    capture = capture_session.get("capture")
+    source_label = str(capture_session.get("source_label", "device path"))
+    if capture is None:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "camera_open_failed",
+                "message": f"Continuous capture session for '{camera_id}' is not open",
+            },
+        }
+
+    frame = None
+    for attempt in range(5):
+        ok, candidate = capture.read()
+        if ok and candidate is not None:
+            frame = candidate
+            break
+        if attempt < 4:
+            time.sleep(0.02)
+
+    if frame is None:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "camera_read_failed",
+                "message": f"OpenCV could not read a frame from selected camera '{camera_id}' via {source_label}",
+            },
+        }
+
+    shape = getattr(frame, "shape", None)
+    if shape is None or len(shape) < 2:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "camera_frame_invalid",
+                "message": f"OpenCV returned an invalid frame shape for selected camera '{camera_id}' via {source_label}",
+            },
+        }
+
+    height = int(shape[0])
+    width = int(shape[1])
+    if width <= 0 or height <= 0:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "camera_frame_invalid",
+                "message": f"OpenCV returned non-positive frame dimensions for selected camera '{camera_id}' via {source_label}",
+            },
+        }
+
+    note = f"Captured live session frame {sample_index} from '{camera_id}' with dimensions {width}x{height}."
+    if source_label != "device path":
+        note = f"Captured live session frame {sample_index} from '{camera_id}' with dimensions {width}x{height} via {source_label}."
+    return {
+        "ok": True,
+        "frame_bgr": frame,
+        "raw_tracking_frame": _raw_tracking_frame_base("live_camera", camera_id, width, height, _now_ms()),
+        "notes": [note],
+    }
+
+
+def _create_inference_session(runtime: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "opencv_unavailable",
+                "message": f"OpenCV import failed while preparing continuous MediaPipe inference: {exc}",
+            },
+        }
+
+    try:
+        import mediapipe as mp  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_unavailable",
+                "message": f"MediaPipe import failed while preparing continuous pose inference: {exc}",
+            },
+        }
+
+    has_legacy_pose = hasattr(mp, "solutions") and hasattr(mp.solutions, "pose")
+    has_tasks_api = hasattr(mp, "tasks") and hasattr(mp, "Image") and hasattr(mp, "ImageFormat")
+
+    if has_legacy_pose:
+        try:
+            pose = mp.solutions.pose.Pose(static_image_mode=False)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe legacy pose session could not be created: {exc}",
+                },
+            }
+        return {
+            "ok": True,
+            "backend": "mediapipe_solutions_pose",
+            "cv2": cv2,
+            "processor": pose,
+        }
+
+    if has_tasks_api:
+        model_path = _resolve_pose_landmarker_model_path(runtime)
+        if model_path == "":
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_model_missing",
+                    "message": "MediaPipe tasks pose inference requires a pose landmarker .task model asset, but none was found. Checked runtime.pose_landmarker_model_path, runtime.model_asset_path, runtime.model_complexity-selected default repo model locations, AEROBEAT_MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH, and MEDIAPIPE_POSE_LANDMARKER_MODEL_PATH.",
+                },
+            }
+        try:
+            from mediapipe.tasks.python import vision  # type: ignore
+            from mediapipe.tasks.python.core.base_options import BaseOptions  # type: ignore
+            options = vision.PoseLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=model_path),
+                running_mode=vision.RunningMode.IMAGE,
+                num_poses=1,
+            )
+            landmarker = vision.PoseLandmarker.create_from_options(options)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_package_unsupported",
+                    "message": f"Installed MediaPipe package exposes mediapipe.tasks but could not create a reusable PoseLandmarker on this host: {exc}",
+                },
+            }
+        return {
+            "ok": True,
+            "backend": "mediapipe_tasks_pose_landmarker",
+            "cv2": cv2,
+            "mp": mp,
+            "processor": landmarker,
+            "model_asset_path": model_path,
+        }
+
+    return {
+        "ok": False,
+        "error_info": {
+            "code": "mediapipe_package_unsupported",
+            "message": "Installed MediaPipe package exposes neither mediapipe.solutions.pose nor a usable mediapipe.tasks vision PoseLandmarker path",
+        },
+    }
+
+
+def _close_inference_session(inference_session: Dict[str, Any]) -> None:
+    processor = inference_session.get("processor")
+    close = getattr(processor, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _infer_pose_landmarks_from_session(frame_bgr: Any, inference_session: Dict[str, Any]) -> Dict[str, Any]:
+    cv2 = inference_session.get("cv2")
+    if cv2 is None:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "opencv_unavailable",
+                "message": "Continuous inference session is missing OpenCV bindings",
+            },
+        }
+
+    try:
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_inference_failed",
+                "message": f"OpenCV could not convert the sampled frame for MediaPipe inference: {exc}",
+            },
+        }
+
+    backend = str(inference_session.get("backend", ""))
+    processor = inference_session.get("processor")
+    if backend == "mediapipe_solutions_pose":
+        try:
+            results = processor.process(frame_rgb)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe legacy pose inference failed for the sampled frame: {exc}",
+                },
+            }
+        return {
+            "ok": True,
+            "landmarks": _landmarks_from_legacy_results(results),
+            "inference_backend": backend,
+        }
+
+    if backend == "mediapipe_tasks_pose_landmarker":
+        mp = inference_session.get("mp")
+        if mp is None:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_package_unsupported",
+                    "message": "Continuous inference session is missing MediaPipe tasks bindings",
+                },
+            }
+        try:
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            result = processor.detect(mp_image)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe tasks pose inference failed for the sampled frame: {exc}",
+                },
+            }
+        return {
+            "ok": True,
+            "landmarks": _landmarks_from_tasks_result(result),
+            "inference_backend": backend,
+            "model_asset_path": inference_session.get("model_asset_path", ""),
+        }
+
+    return {
+        "ok": False,
+        "error_info": {
+            "code": "mediapipe_package_unsupported",
+            "message": f"Continuous inference session backend '{backend}' is unsupported",
+        },
+    }
 
 
 def _infer_pose_landmarks_legacy(mp: Any, frame_rgb: Any) -> Dict[str, Any]:
@@ -799,7 +1211,7 @@ def _infer_pose_landmarks_with_mediapipe(runtime: Dict[str, Any], frame_bgr: Any
     }
 
 
-def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any]) -> Dict[str, Any]:
+def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], inference_session: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     raw_tracking_frame = sampled.get("raw_tracking_frame", {}).copy()
     notes = list(sampled.get("notes", []))
 
@@ -838,7 +1250,7 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any]) -> D
             "notes": notes,
         }
 
-    inferred = _infer_pose_landmarks_with_mediapipe(runtime, frame_bgr)
+    inferred = _infer_pose_landmarks_from_session(frame_bgr, inference_session) if inference_session is not None else _infer_pose_landmarks_with_mediapipe(runtime, frame_bgr)
     if not bool(inferred.get("ok", False)):
         return {
             "ok": False,
@@ -870,13 +1282,18 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any]) -> D
     }
 
 
-def _preview_descriptor(preview: Dict[str, Any]) -> Dict[str, Any]:
+def _preview_descriptor(preview: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    preview_config = _preview_runtime_config(preview, runtime or {})
     return {
-        "enabled": bool(preview.get("enabled", True)),
-        "surface_mode": str(preview.get("surface_mode", "attach")),
+        "enabled": preview_config["enabled"],
+        "surface_mode": preview_config["surface_mode"],
         "attached": False,
-        "flip_horizontal": bool(preview.get("flip_horizontal", True)),
+        "flip_horizontal": preview_config["flip_horizontal"],
         "maintain_aspect_ratio": True,
+        "max_fps": preview_config["max_fps"],
+        "width": preview_config["width"],
+        "height": preview_config["height"],
+        "quality": preview_config["quality"],
         "backend": "mediapipe_python",
     }
 
@@ -1034,7 +1451,7 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
         "cameras": cameras,
         "selected_camera_id": selected_camera_id,
         "health": health,
-        "preview_descriptor": _preview_descriptor(preview),
+        "preview_descriptor": _preview_descriptor(preview, runtime),
         "raw_tracking_frame": raw_tracking_frame,
         "frame_bgr": sampled.get("frame_bgr"),
     }
@@ -1054,26 +1471,57 @@ def _session_preview_frame_path(session_dir: str) -> str:
     return os.path.join(session_dir, _SESSION_PREVIEW_FRAME_FILENAME)
 
 
-def _write_preview_frame(session_dir: str, frame_bgr: Any) -> Dict[str, Any]:
+def _resize_preview_frame(cv2: Any, frame_bgr: Any, max_width: int, max_height: int) -> Any:
+    shape = getattr(frame_bgr, "shape", None)
+    if shape is None or len(shape) < 2:
+        return frame_bgr
+    source_height = int(shape[0])
+    source_width = int(shape[1])
+    if source_width <= 0 or source_height <= 0:
+        return frame_bgr
+    if source_width <= max_width and source_height <= max_height:
+        return frame_bgr
+    scale = min(float(max_width) / float(source_width), float(max_height) / float(source_height))
+    if scale >= 1.0:
+        return frame_bgr
+    target_width = max(1, int(math.floor(source_width * scale)))
+    target_height = max(1, int(math.floor(source_height * scale)))
+    return cv2.resize(frame_bgr, (target_width, target_height))
+
+
+def _write_preview_frame(session_dir: str, frame_bgr: Any, preview: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if session_dir == "" or frame_bgr is None:
+        return {}
+    preview_config = _preview_runtime_config(preview, runtime or {})
+    if not preview_config["enabled"]:
         return {}
     try:
         import cv2  # type: ignore
     except Exception:
         return {}
     preview_path = _session_preview_frame_path(session_dir)
-    if not cv2.imwrite(preview_path, frame_bgr):
+    prepared_frame = _resize_preview_frame(cv2, frame_bgr, preview_config["width"], preview_config["height"])
+    params: List[int] = []
+    if hasattr(cv2, "IMWRITE_JPEG_QUALITY"):
+        params = [int(cv2.IMWRITE_JPEG_QUALITY), preview_config["quality"]]
+    wrote = cv2.imwrite(preview_path, prepared_frame, params) if params else cv2.imwrite(preview_path, prepared_frame)
+    if not wrote:
         return {}
+    output_shape = getattr(prepared_frame, "shape", None)
+    output_height = int(output_shape[0]) if output_shape is not None and len(output_shape) >= 2 else preview_config["height"]
+    output_width = int(output_shape[1]) if output_shape is not None and len(output_shape) >= 2 else preview_config["width"]
     return {
         "image_path": preview_path,
         "image_revision": int(time.time() * 1000),
         "image_format": "jpg",
+        "image_width": output_width,
+        "image_height": output_height,
     }
 
 
-def _with_preview_frame(session_dir: str, preview: Dict[str, Any], frame_bgr: Any) -> Dict[str, Any]:
-    descriptor = _preview_descriptor(preview)
-    descriptor.update(_write_preview_frame(session_dir, frame_bgr))
+def _with_preview_frame(session_dir: str, preview: Dict[str, Any], frame_bgr: Any, runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    descriptor = _preview_descriptor(preview, runtime)
+    descriptor.update(_write_preview_frame(session_dir, frame_bgr, preview, runtime))
     return descriptor
 
 
@@ -1118,7 +1566,7 @@ def _write_session_snapshot(session_dir: str, payload: Dict[str, Any]) -> None:
     _write_json_atomic(_session_snapshot_path(session_dir), payload)
 
 
-def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any], sample_index: int, loop_started_ms: int, session_dir: str = "") -> Dict[str, Any]:
+def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any], sample_index: int, loop_started_ms: int, session_dir: str = "", include_preview_frame: bool = True, existing_preview_descriptor: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     snapshot = sampled.copy()
     health = snapshot.get("health", {}).copy()
     health.update({
@@ -1138,7 +1586,11 @@ def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any
     health["notes"] = notes
     snapshot["health"] = health
     preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
-    snapshot["preview_descriptor"] = _with_preview_frame(session_dir, preview, sampled.get("frame_bgr"))
+    runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
+    if include_preview_frame:
+        snapshot["preview_descriptor"] = _with_preview_frame(session_dir, preview, sampled.get("frame_bgr"), runtime)
+    else:
+        snapshot["preview_descriptor"] = (existing_preview_descriptor or _preview_descriptor(preview, runtime)).copy()
     snapshot.pop("frame_bgr", None)
     snapshot["ok"] = True
     return snapshot
@@ -1167,7 +1619,7 @@ def _continuous_error_snapshot(request: Dict[str, Any], failure: Dict[str, Any],
         "cameras": failure.get("cameras", []),
         "selected_camera_id": failure.get("selected_camera_id", ""),
         "health": health,
-        "preview_descriptor": _preview_descriptor(request.get("preview", {})),
+        "preview_descriptor": _preview_descriptor(request.get("preview", {}), runtime),
         "raw_tracking_frame": failure.get("raw_tracking_frame", {}),
         "error_info": error_info,
     }
@@ -1181,44 +1633,162 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
     os.makedirs(session_dir, exist_ok=True)
     _write_json_atomic(_session_request_path(session_dir), request)
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
-    interval_ms = max(30, int(runtime.get("health_poll_interval_ms", 250)))
+    preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
+    preview_config = _preview_runtime_config(preview, runtime)
+    tracking_interval = _fps_interval_seconds(runtime.get("tracking_max_fps", _DEFAULT_TRACKING_MAX_FPS), _DEFAULT_TRACKING_MAX_FPS)
+    state_interval = _fps_interval_seconds(runtime.get("state_update_max_fps", _DEFAULT_STATE_UPDATE_MAX_FPS), _DEFAULT_STATE_UPDATE_MAX_FPS)
+    preview_interval = _fps_interval_seconds(preview_config.get("max_fps", _DEFAULT_PREVIEW_MAX_FPS), _DEFAULT_PREVIEW_MAX_FPS)
     loop_started_ms = _now_ms()
     sample_index = 0
+    last_state_write_at: Optional[float] = None
+    last_preview_write_at: Optional[float] = None
+    last_preview_descriptor = _preview_descriptor(preview, runtime)
 
-    while True:
-        if os.path.exists(_session_stop_path(session_dir)):
-            shutdown_snapshot = {
-                "ok": True,
-                "cameras": _enumerate_cameras(runtime),
-                "selected_camera_id": "",
-                "health": {
-                    **_base_health("shutdown", runtime),
-                    "status": "idle",
-                    "runtime_available": True,
-                    "bridge_connected": True,
-                    "process_active": False,
-                    "camera_accessible": False,
-                    "tracking_active": False,
-                    "healthy": True,
-                    "notes": ["Continuous MediaPipe runtime session stopped cleanly."],
-                },
-                "preview_descriptor": _preview_descriptor(request.get("preview", {})),
-                "raw_tracking_frame": {},
-            }
-            _write_session_snapshot(session_dir, shutdown_snapshot)
-            return 0
+    selection = _select_source(request)
+    if not bool(selection.get("ok", False)):
+        snapshot = _continuous_error_snapshot(request, selection, sample_index, loop_started_ms)
+        _write_session_snapshot(session_dir, snapshot)
+        return 1
 
-        sampled = _sample_once(request, sample_index=sample_index, dynamic_timestamp=True)
-        if bool(sampled.get("ok", False)):
-            snapshot = _continuous_success_snapshot(request, sampled, sample_index, loop_started_ms, session_dir)
-            _write_session_snapshot(session_dir, snapshot)
-        else:
-            snapshot = _continuous_error_snapshot(request, sampled, sample_index, loop_started_ms)
+    selected_camera_id = str(selection.get("selected_camera_id", ""))
+    selected = selection.get("selected", {}) if isinstance(selection.get("selected", {}), dict) else {}
+    capture_session = _open_live_camera_capture_session(selected_camera_id, runtime)
+    if not bool(capture_session.get("ok", False)):
+        snapshot = _continuous_error_snapshot(request, {
+            "error_info": capture_session.get("error_info", {
+                "code": "camera_open_failed",
+                "message": f"Failed to open selected camera '{selected_camera_id}' for continuous capture",
+            }),
+            "cameras": selection.get("cameras", []),
+            "selected_camera_id": selected_camera_id,
+            "health": {"camera_accessible": False},
+        }, sample_index, loop_started_ms)
+        _write_session_snapshot(session_dir, snapshot)
+        return 1
+
+    inference_session: Optional[Dict[str, Any]] = None
+    if not bool(capture_session.get("fixture_only", False)):
+        inference_session = _create_inference_session(runtime)
+        if not bool(inference_session.get("ok", False)):
+            _close_live_camera_capture_session(capture_session)
+            snapshot = _continuous_error_snapshot(request, {
+                "error_info": inference_session.get("error_info", {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"Failed to initialize continuous pose inference for camera '{selected_camera_id}'",
+                }),
+                "cameras": selection.get("cameras", []),
+                "selected_camera_id": selected_camera_id,
+                "health": {"camera_accessible": True},
+            }, sample_index, loop_started_ms)
             _write_session_snapshot(session_dir, snapshot)
             return 1
 
-        sample_index += 1
-        time.sleep(float(interval_ms) / 1000.0)
+    try:
+        while True:
+            iteration_started_at = time.monotonic()
+            if os.path.exists(_session_stop_path(session_dir)):
+                shutdown_snapshot = {
+                    "ok": True,
+                    "cameras": _enumerate_cameras(runtime),
+                    "selected_camera_id": selected_camera_id,
+                    "health": {
+                        **_base_health("shutdown", runtime),
+                        "status": "idle",
+                        "runtime_available": True,
+                        "bridge_connected": True,
+                        "process_active": False,
+                        "camera_accessible": bool(selected.get("available", False)),
+                        "tracking_active": False,
+                        "healthy": True,
+                        "selected_camera_id": selected_camera_id,
+                        "selected_camera_label": selected.get("label", selected_camera_id),
+                        "notes": ["Continuous MediaPipe runtime session stopped cleanly."],
+                    },
+                    "preview_descriptor": last_preview_descriptor.copy(),
+                    "raw_tracking_frame": {},
+                }
+                _write_session_snapshot(session_dir, shutdown_snapshot)
+                return 0
+
+            sampled = _capture_live_camera_session_sample(selected_camera_id, runtime, capture_session, sample_index=sample_index, dynamic_timestamp=True)
+            if not bool(sampled.get("ok", False)):
+                snapshot = _continuous_error_snapshot(request, {
+                    **sampled,
+                    "cameras": _enumerate_cameras(runtime),
+                    "selected_camera_id": selected_camera_id,
+                }, sample_index, loop_started_ms)
+                _write_session_snapshot(session_dir, snapshot)
+                return 1
+
+            inferred = _infer_pose_landmarks(sampled, runtime, inference_session=inference_session)
+            if not bool(inferred.get("ok", False)):
+                snapshot = _continuous_error_snapshot(request, {
+                    "error_info": inferred.get("error_info", {
+                        "code": "mediapipe_inference_failed",
+                        "message": f"Failed to infer pose landmarks from selected camera '{selected_camera_id}'",
+                    }),
+                    "raw_tracking_frame": inferred.get("raw_tracking_frame", {}),
+                    "cameras": _enumerate_cameras(runtime),
+                    "selected_camera_id": selected_camera_id,
+                    "health": {
+                        "camera_accessible": True,
+                    },
+                }, sample_index, loop_started_ms)
+                _write_session_snapshot(session_dir, snapshot)
+                return 1
+
+            raw_tracking_frame = inferred.get("raw_tracking_frame", {}).copy()
+            landmarks = raw_tracking_frame.get("landmarks")
+            health = selection.get("health", {}).copy() if isinstance(selection.get("health", {}), dict) else _base_health("startup", runtime)
+            base_notes = list(health.get("notes", []))
+            health.update({
+                "camera_accessible": True,
+                "healthy": True,
+                "tracking_active": True,
+                "process_active": True,
+                "status": "running",
+                "loop_iteration": sample_index,
+                "loop_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(loop_started_ms / 1000.0)),
+                "probed_at": _now_iso(),
+                "selected_camera_id": selected_camera_id,
+                "selected_camera_label": selected.get("label", selected_camera_id),
+                "notes": base_notes + inferred.get("notes", []),
+            })
+            if isinstance(landmarks, list) and len(landmarks) > 0:
+                health["notes"].append(f"Returning {len(landmarks)} raw sampled pose landmark(s).")
+            else:
+                health["notes"].append("Returning no raw landmarks because the sampled frame did not produce a pose.")
+
+            sampled_snapshot = {
+                "ok": True,
+                "cameras": _enumerate_cameras(runtime),
+                "selected_camera_id": selected_camera_id,
+                "health": health,
+                "preview_descriptor": last_preview_descriptor.copy(),
+                "raw_tracking_frame": raw_tracking_frame,
+                "frame_bgr": sampled.get("frame_bgr"),
+            }
+
+            now = time.monotonic()
+            should_write_state = last_state_write_at is None or state_interval <= 0.0 or (now - last_state_write_at) >= state_interval
+            include_preview = bool(preview_config.get("enabled", True)) and should_write_state and (last_preview_write_at is None or preview_interval <= 0.0 or (now - last_preview_write_at) >= preview_interval)
+            if should_write_state:
+                snapshot = _continuous_success_snapshot(request, sampled_snapshot, sample_index, loop_started_ms, session_dir, include_preview_frame=include_preview, existing_preview_descriptor=last_preview_descriptor)
+                last_preview_descriptor = snapshot.get("preview_descriptor", last_preview_descriptor).copy()
+                _write_session_snapshot(session_dir, snapshot)
+                last_state_write_at = now
+                if include_preview:
+                    last_preview_write_at = now
+
+            sample_index += 1
+            if tracking_interval > 0.0:
+                sleep_seconds = max(0.0, tracking_interval - (time.monotonic() - iteration_started_at))
+                if sleep_seconds > 0.0:
+                    time.sleep(sleep_seconds)
+    finally:
+        if inference_session is not None:
+            _close_inference_session(inference_session)
+        _close_live_camera_capture_session(capture_session)
 
 
 def _success_response(request: Dict[str, Any]) -> Dict[str, Any]:

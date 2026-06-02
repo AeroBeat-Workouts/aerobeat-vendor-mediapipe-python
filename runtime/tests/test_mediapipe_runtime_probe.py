@@ -277,6 +277,63 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertFalse(snapshot["health"]["tracking_active"])
             self.assertEqual(snapshot["raw_tracking_frame"], {})
 
+    def test_preview_descriptor_uses_runtime_preview_knobs(self):
+        descriptor = probe._preview_descriptor(
+            {"enabled": True, "surface_mode": "attach", "flip_horizontal": False},
+            {
+                "preview_enabled": False,
+                "preview_max_fps": 60,
+                "preview_width": 640,
+                "preview_height": 360,
+                "preview_quality": 80,
+            },
+        )
+        self.assertFalse(descriptor["enabled"])
+        self.assertEqual(descriptor["max_fps"], 60)
+        self.assertEqual(descriptor["width"], 640)
+        self.assertEqual(descriptor["height"], 360)
+        self.assertEqual(descriptor["quality"], 80)
+        self.assertFalse(descriptor["flip_horizontal"])
+
+    def test_video_file_session_tracking_sleep_uses_tracking_max_fps_instead_of_health_poll_interval(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "fixture.mp4"
+            video_path.write_bytes(b"fixture-video")
+            session_dir = Path(temp_dir) / "session"
+            request = {
+                "operation": "startup",
+                "runtime": {
+                    "working_directory": temp_dir,
+                    "health_poll_interval_ms": 250,
+                    "tracking_max_fps": 60,
+                    "state_update_max_fps": 60,
+                    "environment": {
+                        "AEROBEAT_CAMERA_SAMPLE_FIXTURES_JSON": json.dumps({
+                            str(video_path): {
+                                "sequence": [
+                                    {"width": 640, "height": 360, "timestamp_ms": 10},
+                                    {"width": 640, "height": 360, "timestamp_ms": 20}
+                                ]
+                            }
+                        })
+                    }
+                },
+                "source": {"kind": "video_file", "path": str(video_path)},
+                "preview": {"enabled": True},
+            }
+            sleeps = []
+
+            def _fake_sleep(duration):
+                sleeps.append(duration)
+                return None
+
+            with mock.patch.object(probe.time, "sleep", side_effect=_fake_sleep):
+                exit_code = probe._run_continuous_session(request, str(session_dir))
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(any(duration < 0.05 for duration in sleeps), sleeps)
+            self.assertFalse(any(abs(duration - 0.25) < 0.001 for duration in sleeps), sleeps)
+
 
 if __name__ == "__main__":
     unittest.main()
