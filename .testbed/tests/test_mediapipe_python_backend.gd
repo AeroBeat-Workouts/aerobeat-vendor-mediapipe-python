@@ -109,6 +109,7 @@ func test_vendor_runtime_config_translation_keeps_public_shape_and_vendor_overri
 	})
 
 	assert_eq(vendor_config["backend"], "mediapipe_python")
+	assert_eq(vendor_config.get("source", {}).get("kind", ""), "live_camera")
 	assert_eq(vendor_config["source"]["camera_id"], "/dev/video0")
 	assert_eq(vendor_config["tracking"]["min_visibility"], 0.6)
 	assert_eq(vendor_config["runtime"]["python_executable"], "python3.13")
@@ -139,6 +140,8 @@ func test_inventory_and_frame_mapper_normalize_vendor_payloads() -> void:
 		"preview": {"flip_horizontal": false}
 	})
 	assert_eq(frame["backend"], "mediapipe_python")
+	assert_eq(frame.get("backend_request"), "camera_tracking_default")
+	assert_eq(frame.get("backend_impl"), "mediapipe_python")
 	assert_eq(frame["source_id"], "/dev/video0")
 	assert_false(frame["preview_transform"]["flip_horizontal"])
 	assert_eq(frame["tracking_state"], "tracked")
