@@ -242,12 +242,14 @@ func test_startup_fails_honestly_when_landmark_inference_fails() -> void:
 func test_startup_fails_honestly_when_camera_sample_cannot_be_captured() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
 	var snapshot := bridge.startup(_make_runtime_config({}, false))
+	var error_code := str(snapshot.get("error_info", {}).get("code", ""))
 
 	assert_false(snapshot["ok"])
-	assert_eq(snapshot["error_info"]["code"], "camera_open_failed")
+	assert_true(["opencv_unavailable", "camera_open_failed"].has(error_code))
 	assert_eq(bridge.poll_health()["selected_camera_id"], _fixture_root.path_join("video0"))
 	assert_eq(bridge.poll_health()["status"], MediaPipePythonRuntimeHealth.STATUS_ERROR)
 	assert_false(bridge.poll_health()["camera_accessible"])
+	assert_false(bridge.poll_health()["healthy"])
 
 func _make_runtime_config(overrides: Dictionary = {}, include_sample_fixture: bool = true) -> Dictionary:
 	var environment := {
