@@ -1392,6 +1392,15 @@ def _replay_eof_snapshot(request: Dict[str, Any], selected_source_id: str, loop_
     }
 
 
+def _rewind_replay_capture(capture: Any, cv2: Any, replay_start_time_sec: float) -> bool:
+    target_msec = max(replay_start_time_sec, 0.0) * 1000.0
+    try:
+        rewound = capture.set(cv2.CAP_PROP_POS_MSEC, target_msec)
+    except Exception:
+        rewound = False
+    return bool(rewound)
+
+
 def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     _arm_owner_orphan_protection()
     os.makedirs(session_dir, exist_ok=True)
@@ -1410,7 +1419,9 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     sample_index = 0
     fixture_map = _sample_fixture_map(runtime)
     use_fixture_sequence = isinstance(fixture_map.get(video_path), dict)
-    start_time_sec = max(0.0, float(source.get("start_time_sec", 0.0) or 0.0))
+    replay_start_time_sec = max(0.0, float(source.get("start_time_sec", 0.0) or 0.0))
+    loop_enabled = bool(source.get("loop", False))
+    fixture_frame_index = 0
     duration_sec = 0.0
     last_state_write_at: Optional[float] = None
     last_preview_write_at: Optional[float] = None
@@ -1447,8 +1458,8 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
         frame_count = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
         if fps > 0.0 and frame_count > 0.0:
             duration_sec = frame_count / fps
-        if start_time_sec > 0.0:
-            capture.set(cv2.CAP_PROP_POS_MSEC, start_time_sec * 1000.0)
+        if replay_start_time_sec > 0.0:
+            capture.set(cv2.CAP_PROP_POS_MSEC, replay_start_time_sec * 1000.0)
 
     inference_session: Optional[Dict[str, Any]] = None
     if not use_fixture_sequence:
@@ -1488,7 +1499,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                         "notes": [f"Replay session for '{video_path}' stopped cleanly."],
                     },
                     "preview_descriptor": last_preview_descriptor.copy(),
-                    "playback_status": _playback_status(video_path, start_time_sec, duration_sec, "paused", True),
+                    "playback_status": _playback_status(video_path, replay_start_time_sec, duration_sec, "paused", True),
                     "raw_tracking_frame": {},
                 }
                 _write_session_snapshot(session_dir, shutdown_snapshot)
@@ -1514,15 +1525,18 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                         "notes": [shutdown_note],
                     },
                     "preview_descriptor": last_preview_descriptor.copy(),
-                    "playback_status": _playback_status(video_path, start_time_sec, duration_sec, "paused", True),
+                    "playback_status": _playback_status(video_path, replay_start_time_sec, duration_sec, "paused", True),
                     "raw_tracking_frame": {},
                 }
                 _write_session_snapshot(session_dir, shutdown_snapshot)
                 return 0
 
             if use_fixture_sequence:
-                sampled = _capture_video_file_sample(video_path, runtime, sample_index=sample_index, dynamic_timestamp=True)
+                sampled = _capture_video_file_sample(video_path, runtime, sample_index=fixture_frame_index, dynamic_timestamp=True)
                 if not bool(sampled.get("ok", False)) and sampled.get("error_info", {}).get("code") == "video_file_eof":
+                    if loop_enabled:
+                        fixture_frame_index = 0
+                        continue
                     eof_snapshot = _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index)
                     eof_snapshot["preview_descriptor"] = last_preview_descriptor.copy()
                     _write_session_snapshot(session_dir, eof_snapshot)
@@ -1531,6 +1545,8 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 assert capture is not None
                 ok, frame = capture.read()
                 if not ok or frame is None:
+                    if loop_enabled and _rewind_replay_capture(capture, cv2, replay_start_time_sec):
+                        continue
                     eof_snapshot = _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index)
                     eof_snapshot["preview_descriptor"] = last_preview_descriptor.copy()
                     eof_snapshot["playback_status"] = _playback_status(video_path, duration_sec, duration_sec, "ended", True)
@@ -1602,9 +1618,9 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 health["notes"].append(f"Returning {len(landmarks)} raw replay pose landmark(s).")
             else:
                 health["notes"].append("Returning no raw landmarks because the replay frame did not produce a pose.")
-            current_time_sec = start_time_sec
+            current_time_sec = replay_start_time_sec
             if capture is not None and cv2 is not None:
-                current_time_sec = max(start_time_sec, float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0)
+                current_time_sec = max(replay_start_time_sec, float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0)
 
             sampled_snapshot = {
                 "ok": True,
@@ -1629,6 +1645,8 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                     last_preview_write_at = now
 
             sample_index += 1
+            if use_fixture_sequence:
+                fixture_frame_index += 1
             if tracking_interval > 0.0:
                 sleep_seconds = max(0.0, tracking_interval - (time.monotonic() - iteration_started_at))
                 if sleep_seconds > 0.0:
