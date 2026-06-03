@@ -15,6 +15,7 @@ var _last_cameras: Array = []
 var _last_preview_descriptor: Dictionary = {}
 var _last_playback_status: Dictionary = {}
 var _last_raw_tracking_frame: Dictionary = {}
+var _last_camera_options: Dictionary = {}
 var _last_selected_camera_id: String = ""
 var _last_error_info: Dictionary = {}
 var _session_dir: String = ""
@@ -43,13 +44,15 @@ func shutdown() -> Dictionary:
 		_last_preview_descriptor = {}
 		_last_playback_status = {}
 		_last_raw_tracking_frame = {}
+		_last_camera_options = {}
 		return {
 			"ok": true,
 			"health": _last_health.duplicate(true),
 			"cameras": _last_cameras.duplicate(true),
 			"preview_descriptor": {},
 			"playback_status": _last_playback_status.duplicate(true),
-			"raw_tracking_frame": {}
+			"raw_tracking_frame": {},
+			"camera_options": _last_camera_options.duplicate(true)
 		}
 
 	var stop_path := _session_dir.path_join(_SESSION_STOP_FILENAME)
@@ -80,6 +83,7 @@ func shutdown() -> Dictionary:
 	_last_preview_descriptor = {}
 	_last_playback_status = {}
 	_last_raw_tracking_frame = {}
+	_last_camera_options = {}
 	_last_health = MediaPipePythonRuntimeHealth.idle({
 		"bridge_connected": true,
 		"runtime_available": true,
@@ -102,7 +106,8 @@ func shutdown() -> Dictionary:
 		"cameras": _last_cameras.duplicate(true),
 		"preview_descriptor": {},
 		"playback_status": _last_playback_status.duplicate(true),
-		"raw_tracking_frame": {}
+		"raw_tracking_frame": {},
+		"camera_options": _last_camera_options.duplicate(true)
 	}
 
 func reconfigure(vendor_config: Dictionary) -> Dictionary:
@@ -128,6 +133,22 @@ func list_cameras() -> Array:
 func get_last_playback_status() -> Dictionary:
 	return _last_playback_status.duplicate(true)
 
+func get_last_camera_options() -> Dictionary:
+	return _last_camera_options.duplicate(true)
+
+func describe_camera_options(camera_id: String = "") -> Dictionary:
+	var config := _last_vendor_config.duplicate(true)
+	if config.is_empty():
+		config = MediaPipePythonConfig.vendor_defaults()
+	if camera_id != "":
+		var source: Dictionary = config.get("source", {}).duplicate(true)
+		source["camera_id"] = camera_id
+		config["source"] = source
+	var prepared := _prepare_vendor_config(config, false)
+	if bool(prepared.get("ok", false)) == false:
+		return _remember_failure(prepared.get("error_info", {}), prepared.get("health", {}))
+	return _run_runtime_operation("describe_camera_options", prepared.get("config", {}))
+
 func poll_health() -> Dictionary:
 	if _session_dir != "" and _session_pid > 0:
 		poll_snapshot()
@@ -141,7 +162,8 @@ func poll_snapshot() -> Dictionary:
 			"cameras": _last_cameras.duplicate(true),
 			"preview_descriptor": _last_preview_descriptor.duplicate(true),
 			"playback_status": _last_playback_status.duplicate(true),
-			"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true)
+			"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true),
+			"camera_options": _last_camera_options.duplicate(true)
 		}
 
 	var snapshot := _read_session_snapshot(_session_dir)
@@ -153,7 +175,8 @@ func poll_snapshot() -> Dictionary:
 				"cameras": _last_cameras.duplicate(true),
 				"preview_descriptor": _last_preview_descriptor.duplicate(true),
 				"playback_status": _last_playback_status.duplicate(true),
-				"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true)
+				"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true),
+				"camera_options": _last_camera_options.duplicate(true)
 			}
 		return _remember_failure({
 			"code": "runtime_session_snapshot_missing",
@@ -240,7 +263,8 @@ func _start_runtime_session(operation: String, vendor_config: Dictionary) -> Dic
 				"cameras": _last_cameras.duplicate(true),
 				"preview_descriptor": _last_preview_descriptor.duplicate(true),
 				"playback_status": _last_playback_status.duplicate(true),
-				"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true)
+				"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true),
+				"camera_options": _last_camera_options.duplicate(true)
 			}
 		if OS.is_process_running(_session_pid) == false:
 			break
@@ -307,7 +331,8 @@ func _run_runtime_operation(operation: String, vendor_config: Dictionary) -> Dic
 		"health": _last_health.duplicate(true),
 		"cameras": _last_cameras.duplicate(true),
 		"preview_descriptor": _last_preview_descriptor.duplicate(true),
-		"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true)
+		"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true),
+		"camera_options": _last_camera_options.duplicate(true)
 	}
 
 func _sync_from_snapshot(snapshot: Dictionary) -> void:
@@ -315,6 +340,7 @@ func _sync_from_snapshot(snapshot: Dictionary) -> void:
 	_last_preview_descriptor = snapshot.get("preview_descriptor", {}).duplicate(true)
 	_last_playback_status = snapshot.get("playback_status", {}).duplicate(true)
 	_last_raw_tracking_frame = snapshot.get("raw_tracking_frame", {}).duplicate(true)
+	_last_camera_options = snapshot.get("camera_options", {}).duplicate(true)
 	_last_selected_camera_id = str(snapshot.get("selected_camera_id", _last_selected_camera_id))
 	_last_error_info = snapshot.get("error_info", {}).duplicate(true)
 	_last_health = MediaPipePythonRuntimeHealth.make(snapshot.get("health", {}))
@@ -478,6 +504,7 @@ func _remember_failure(error_info: Dictionary, health: Dictionary, cameras: Arra
 	_last_preview_descriptor = {}
 	_last_playback_status = {}
 	_last_raw_tracking_frame = {}
+	_last_camera_options = {}
 	return {
 		"ok": false,
 		"health": _last_health.duplicate(true),

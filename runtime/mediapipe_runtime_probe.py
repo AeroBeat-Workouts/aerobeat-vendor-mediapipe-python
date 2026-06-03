@@ -5,6 +5,8 @@ import json
 import math
 import os
 import platform
+import re
+import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -453,6 +455,7 @@ def _live_camera_capture_request(runtime: Dict[str, Any]) -> Dict[str, Any]:
         "width": requested_width,
         "height": requested_height,
         "fps": requested_fps,
+        "fourcc": preferred_fourcc,
         "preferred_fourcc": preferred_fourcc,
     }
 
@@ -515,36 +518,267 @@ def _decode_fourcc(value: float) -> str:
     return decoded if decoded.isprintable() else ""
 
 
-def _live_camera_capture_attempts(cv2: Any, camera_id: str, runtime: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _is_linux_video_device(camera_id: str) -> bool:
+    return platform.system() == "Linux" and _camera_device_index(camera_id) is not None
+
+
+def _live_camera_backend_score(backend_name: str, preferred_backend_name: str) -> int:
+    if backend_name == preferred_backend_name:
+        return 2
+    if backend_name == "CAP_V4L2":
+        return 1
+    return 0
+
+
+def _live_camera_format_score(fourcc: str, preferred_fourcc: str) -> int:
+    normalized = str(fourcc or "").strip().upper()
+    preferred = str(preferred_fourcc or "").strip().upper()
+    if normalized != "" and normalized == preferred:
+        return 4
+    if normalized == "MJPG":
+        return 3
+    if normalized in {"YUYV", "YUY2"}:
+        return 2
+    if normalized != "":
+        return 1
+    return 0
+
+
+def _live_camera_resolution_delta(mode: Dict[str, Any], requested: Dict[str, Any]) -> int:
+    return abs(int(mode.get("width", 0)) - int(requested.get("width", 0))) + abs(int(mode.get("height", 0)) - int(requested.get("height", 0)))
+
+
+def _live_camera_fps_sort_key(mode_fps: float, requested_fps: int) -> Tuple[int, float, float]:
+    if requested_fps <= 0:
+        return (0, -mode_fps, 0.0)
+    if mode_fps >= float(requested_fps):
+        return (0, mode_fps - float(requested_fps), -mode_fps)
+    return (1, float(requested_fps) - mode_fps, -mode_fps)
+
+
+def _live_camera_mode_rank_key(mode: Dict[str, Any], requested: Dict[str, Any], preferred_backend_name: str) -> Tuple[Any, ...]:
+    fps = float(mode.get("fps", 0.0) or 0.0)
+    return (
+        *_live_camera_fps_sort_key(fps, int(requested.get("fps", 0))),
+        _live_camera_resolution_delta(mode, requested),
+        -_live_camera_format_score(str(mode.get("fourcc", "")), str(requested.get("preferred_fourcc", ""))),
+        -_live_camera_backend_score(str(mode.get("backend_name", preferred_backend_name)), preferred_backend_name),
+        -int(mode.get("width", 0) or 0) * max(int(mode.get("height", 0) or 0), 1),
+    )
+
+
+def _dedupe_live_camera_modes(modes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for mode in modes:
+        signature = (
+            int(mode.get("width", 0) or 0),
+            int(mode.get("height", 0) or 0),
+            round(float(mode.get("fps", 0.0) or 0.0), 3),
+            str(mode.get("fourcc", "") or "").strip().upper(),
+            str(mode.get("backend_name", "") or ""),
+            str(mode.get("candidate_source", "") or ""),
+        )
+        if signature in seen:
+            continue
+        normalized = dict(mode)
+        normalized["width"] = int(mode.get("width", 0) or 0)
+        normalized["height"] = int(mode.get("height", 0) or 0)
+        normalized["fps"] = round(float(mode.get("fps", 0.0) or 0.0), 3)
+        normalized["fourcc"] = str(mode.get("fourcc", "") or "").strip().upper()
+        deduped.append(normalized)
+        seen.add(signature)
+    return deduped
+
+
+def _rank_live_camera_modes(modes: Sequence[Dict[str, Any]], requested: Dict[str, Any], preferred_backend_name: str) -> List[Dict[str, Any]]:
+    ranked = _dedupe_live_camera_modes(modes)
+    ranked.sort(key=lambda mode: _live_camera_mode_rank_key(mode, requested, preferred_backend_name))
+    return ranked
+
+
+def _live_camera_capture_sources(camera_id: str, backend_name: str) -> List[Tuple[Any, str]]:
     device_index = _camera_device_index(camera_id)
-    preferred_backend = _preferred_live_camera_backend_name(cv2, camera_id)
-    preferred_fourcc = _live_camera_capture_request(runtime)["preferred_fourcc"]
-    attempts: List[Dict[str, Any]] = []
-
-    def _append(capture_source: Any, source_label: str, backend_name: str, requested_fourcc: str) -> None:
-        candidate = {
-            "capture_source": capture_source,
-            "source_label": source_label,
-            "backend_name": backend_name,
-            "requested_fourcc": requested_fourcc,
-        }
-        if candidate not in attempts:
-            attempts.append(candidate)
-
-    if preferred_backend == "CAP_V4L2":
-        _append(camera_id, "device path", "CAP_V4L2", preferred_fourcc)
-        _append(camera_id, "device path", "CAP_V4L2", "YUYV")
-        _append(camera_id, "device path", "CAP_V4L2", "")
-        if device_index is not None:
-            _append(device_index, f"device index fallback {device_index}", "CAP_V4L2", preferred_fourcc)
-            _append(device_index, f"device index fallback {device_index}", "CAP_V4L2", "")
-
-    _append(camera_id, "device path", "default", preferred_fourcc)
-    _append(camera_id, "device path", "default", "")
+    sources: List[Tuple[Any, str]] = [(camera_id, "device path")]
     if device_index is not None:
-        _append(device_index, f"device index fallback {device_index}", "default", preferred_fourcc)
-        _append(device_index, f"device index fallback {device_index}", "default", "")
+        sources.append((device_index, f"device index fallback {device_index}"))
+    return sources
 
+
+def _v4l2_reported_live_camera_modes(camera_id: str, requested: Dict[str, Any], preferred_backend_name: str) -> Dict[str, Any]:
+    if not _is_linux_video_device(camera_id):
+        return {"available": False, "source": "unavailable", "reported_modes": [], "notes": []}
+    try:
+        command = ["v4l2-ctl", "--device", camera_id, "--list-formats-ext"]
+        completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=5)
+    except FileNotFoundError:
+        return {
+            "available": False,
+            "source": "v4l2_missing",
+            "reported_modes": [],
+            "notes": ["v4l2-ctl is unavailable on this host; falling back to bounded OpenCV probing."],
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "v4l2_failed",
+            "reported_modes": [],
+            "notes": [f"v4l2-ctl failed for '{camera_id}': {exc}; falling back to bounded OpenCV probing."],
+        }
+
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        note = f"v4l2-ctl could not enumerate '{camera_id}'"
+        if stderr != "":
+            note += f": {stderr}"
+        note += "; falling back to bounded OpenCV probing."
+        return {"available": False, "source": "v4l2_failed", "reported_modes": [], "notes": [note]}
+
+    reported_modes: List[Dict[str, Any]] = []
+    current_fourcc = ""
+    current_description = ""
+    current_size: Optional[Tuple[int, int]] = None
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        format_match = re.match(r"\[\d+\]: '([^']+)'(?: \((.*)\))?", line)
+        if format_match:
+            current_fourcc = str(format_match.group(1) or "").strip().upper()
+            current_description = str(format_match.group(2) or "").strip()
+            current_size = None
+            continue
+        size_match = re.search(r"Size:\s+Discrete\s+(\d+)x(\d+)", line)
+        if size_match:
+            current_size = (int(size_match.group(1)), int(size_match.group(2)))
+            continue
+        interval_match = re.search(r"Interval:\s+Discrete\s+[0-9.]+s\s+\(([0-9.]+)\s+fps\)", line)
+        if interval_match and current_size is not None:
+            reported_modes.append({
+                "width": current_size[0],
+                "height": current_size[1],
+                "fps": round(float(interval_match.group(1)), 3),
+                "fourcc": current_fourcc,
+                "format_description": current_description,
+                "backend_name": preferred_backend_name,
+                "candidate_source": "reported_v4l2",
+                "report_kind": "reported",
+            })
+
+    reported_modes = _rank_live_camera_modes(reported_modes, requested, preferred_backend_name)
+    notes = [f"Enumerated {len(reported_modes)} reported live-camera mode(s) for '{camera_id}' via v4l2-ctl."] if reported_modes else [f"v4l2-ctl returned no discrete reported modes for '{camera_id}'; falling back to bounded OpenCV probing."]
+    return {
+        "available": len(reported_modes) > 0,
+        "source": "reported_v4l2" if reported_modes else "v4l2_empty",
+        "reported_modes": reported_modes,
+        "notes": notes,
+    }
+
+
+def _fallback_live_camera_probe_modes(requested: Dict[str, Any], preferred_backend_name: str) -> List[Dict[str, Any]]:
+    widths = [int(requested.get("width", _DEFAULT_PREVIEW_WIDTH)), 1920, 1600, 1280, 1024, 960, 848, 800, 640, 320]
+    heights = [int(requested.get("height", _DEFAULT_PREVIEW_HEIGHT)), 1080, 900, 720, 576, 540, 480, 450, 360, 240]
+    fps_values = [int(requested.get("fps", _DEFAULT_TRACKING_MAX_FPS)), 60, 30, 24, 20, 15, 10, 5]
+    fourccs = [str(requested.get("preferred_fourcc", "MJPG")), "MJPG", "YUYV", ""]
+    size_pairs = list(dict.fromkeys((max(width, 1), max(height, 1)) for width, height in zip(widths, heights)))
+    if (int(requested.get("width", 0)), int(requested.get("height", 0))) not in size_pairs:
+        size_pairs.insert(0, (int(requested.get("width", _DEFAULT_PREVIEW_WIDTH)), int(requested.get("height", _DEFAULT_PREVIEW_HEIGHT))))
+    modes: List[Dict[str, Any]] = []
+    for width, height in size_pairs[:8]:
+        for fps in list(dict.fromkeys(fps_values))[:6]:
+            for fourcc in list(dict.fromkeys(str(code or "").strip().upper() for code in fourccs))[:3]:
+                modes.append({
+                    "width": width,
+                    "height": height,
+                    "fps": round(float(max(fps, 0)), 3),
+                    "fourcc": fourcc,
+                    "backend_name": preferred_backend_name,
+                    "candidate_source": "fallback_probe_sweep",
+                    "report_kind": "fallback_candidate",
+                })
+    return _rank_live_camera_modes(modes, requested, preferred_backend_name)[:24]
+
+
+def _live_camera_reported_mode_summary(camera_id: str, runtime: Dict[str, Any], preferred_backend_name: str) -> Dict[str, Any]:
+    requested = _live_camera_capture_request(runtime)
+    v4l2_summary = _v4l2_reported_live_camera_modes(camera_id, requested, preferred_backend_name)
+    if bool(v4l2_summary.get("available", False)):
+        ranked_candidates = list(v4l2_summary.get("reported_modes", []))
+        return {
+            "requested": requested,
+            "reported_source": str(v4l2_summary.get("source", "reported_v4l2")),
+            "reported_options": ranked_candidates,
+            "ranked_candidates": ranked_candidates,
+            "probe_strategy": "reported_v4l2_ranked_shortlist",
+            "notes": list(v4l2_summary.get("notes", [])),
+        }
+
+    ranked_candidates = _fallback_live_camera_probe_modes(requested, preferred_backend_name)
+    notes = list(v4l2_summary.get("notes", []))
+    notes.append(f"Prepared {len(ranked_candidates)} bounded fallback candidate mode(s) for OpenCV probing.")
+    return {
+        "requested": requested,
+        "reported_source": "fallback_probe_sweep",
+        "reported_options": [],
+        "ranked_candidates": ranked_candidates,
+        "probe_strategy": "bounded_probe_sweep",
+        "notes": notes,
+    }
+
+
+def _build_live_camera_attempt(camera_id: str, requested_mode: Dict[str, Any], candidate_mode: Dict[str, Any], backend_name: str, capture_source: Any, source_label: str, rank_index: int) -> Dict[str, Any]:
+    return {
+        "camera_id": camera_id,
+        "capture_source": capture_source,
+        "source_label": source_label,
+        "backend_name": backend_name,
+        "requested_mode": {
+            "width": int(requested_mode.get("width", 0)),
+            "height": int(requested_mode.get("height", 0)),
+            "fps": int(requested_mode.get("fps", 0)),
+            "fourcc": str(requested_mode.get("fourcc", requested_mode.get("preferred_fourcc", "")) or "").strip().upper(),
+        },
+        "candidate_mode": {
+            "width": int(candidate_mode.get("width", 0)),
+            "height": int(candidate_mode.get("height", 0)),
+            "fps": round(float(candidate_mode.get("fps", 0.0) or 0.0), 3),
+            "fourcc": str(candidate_mode.get("fourcc", "") or "").strip().upper(),
+            "candidate_source": str(candidate_mode.get("candidate_source", "reported_v4l2")),
+            "report_kind": str(candidate_mode.get("report_kind", "reported")),
+            "rank_index": rank_index,
+        },
+    }
+
+
+def _live_camera_probe_attempts(cv2: Any, camera_id: str, mode_summary: Dict[str, Any], probe_limit: int = 8) -> List[Dict[str, Any]]:
+    requested = mode_summary.get("requested", {}) if isinstance(mode_summary.get("requested", {}), dict) else _live_camera_capture_request({})
+    preferred_backend_name = _preferred_live_camera_backend_name(cv2, camera_id)
+    ranked_candidates = list(mode_summary.get("ranked_candidates", []))
+    attempts: List[Dict[str, Any]] = []
+    seen = set()
+    backend_order = [preferred_backend_name]
+    if preferred_backend_name != "default":
+        backend_order.append("default")
+    else:
+        if _is_linux_video_device(camera_id) and hasattr(cv2, "CAP_V4L2"):
+            backend_order.append("CAP_V4L2")
+
+    for rank_index, candidate_mode in enumerate(ranked_candidates[:max(probe_limit, 1)]):
+        for backend_name in backend_order:
+            if backend_name == "CAP_V4L2" and hasattr(cv2, "CAP_V4L2") == False:
+                continue
+            for capture_source, source_label in _live_camera_capture_sources(camera_id, backend_name):
+                attempt = _build_live_camera_attempt(camera_id, requested, candidate_mode, backend_name, capture_source, source_label, rank_index)
+                signature = (
+                    attempt["backend_name"],
+                    str(attempt["capture_source"]),
+                    attempt["candidate_mode"]["width"],
+                    attempt["candidate_mode"]["height"],
+                    attempt["candidate_mode"]["fps"],
+                    attempt["candidate_mode"]["fourcc"],
+                )
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                attempts.append(attempt)
     return attempts
 
 
@@ -578,41 +812,45 @@ def _actual_live_camera_mode(cv2: Any, capture: Any, frame: Any) -> Dict[str, An
     }
 
 
-def _live_camera_negotiation_result(camera_id: str, runtime: Dict[str, Any], attempt: Dict[str, Any], actual_mode: Dict[str, Any]) -> Dict[str, Any]:
-    requested = _live_camera_capture_request(runtime)
-    requested_fourcc = str(attempt.get("requested_fourcc", "") or "").strip().upper()
+def _live_camera_negotiation_result(camera_id: str, attempt: Dict[str, Any], actual_mode: Dict[str, Any]) -> Dict[str, Any]:
+    requested = attempt.get("requested_mode", {}) if isinstance(attempt.get("requested_mode", {}), dict) else {}
+    selected = attempt.get("candidate_mode", {}) if isinstance(attempt.get("candidate_mode", {}), dict) else {}
+    selected_fourcc = str(selected.get("fourcc", "") or "").strip().upper()
     actual_fourcc = str(actual_mode.get("fourcc", "") or "").strip().upper()
-    requested_fps = int(requested["fps"])
+    selected_fps = float(selected.get("fps", 0.0) or 0.0)
     actual_fps = float(actual_mode.get("fps", 0.0) or 0.0)
-    width_matches = int(actual_mode.get("width", 0)) == int(requested["width"])
-    height_matches = int(actual_mode.get("height", 0)) == int(requested["height"])
-    fps_matches = requested_fps <= 0 or (actual_fps > 0.0 and abs(actual_fps - float(requested_fps)) <= max(1.0, float(requested_fps) * 0.2))
-    fourcc_matches = requested_fourcc == "" or actual_fourcc == requested_fourcc
+    width_matches = int(actual_mode.get("width", 0)) == int(selected.get("width", 0))
+    height_matches = int(actual_mode.get("height", 0)) == int(selected.get("height", 0))
+    fps_matches = selected_fps <= 0.0 or (actual_fps > 0.0 and abs(actual_fps - selected_fps) <= max(1.0, selected_fps * 0.2))
+    fourcc_matches = selected_fourcc == "" or actual_fourcc == selected_fourcc
     backend_name = str(attempt.get("backend_name", "default"))
-    preferred_backend_name = "CAP_V4L2" if platform.system() == "Linux" and _camera_device_index(camera_id) is not None else "default"
+    preferred_backend_name = "CAP_V4L2" if _is_linux_video_device(camera_id) else "default"
+    requested_fps_key = _live_camera_fps_sort_key(actual_fps, int(requested.get("fps", 0)))
     score = 0
-    if backend_name == preferred_backend_name:
-        score += 25
-    if width_matches:
-        score += 50
-    if height_matches:
-        score += 50
-    if fps_matches:
-        score += 40
-    if fourcc_matches:
-        score += 20
-    if actual_fps > 0.0:
-        score += min(10, int(actual_fps))
+    score -= requested_fps_key[0] * 100000
+    score -= int(round(requested_fps_key[1] * 1000.0)) * 100
+    score -= _live_camera_resolution_delta(actual_mode, requested)
+    score += _live_camera_format_score(actual_fourcc, str(requested.get("preferred_fourcc", requested.get("fourcc", "")))) * 1000
+    score += _live_camera_backend_score(backend_name, preferred_backend_name) * 100
     return {
         "camera_id": camera_id,
         "backend": backend_name,
         "source_label": str(attempt.get("source_label", "device path")),
         "capture_source": attempt.get("capture_source"),
         "requested": {
-            "width": int(requested["width"]),
-            "height": int(requested["height"]),
-            "fps": requested_fps,
-            "fourcc": requested_fourcc,
+            "width": int(requested.get("width", 0)),
+            "height": int(requested.get("height", 0)),
+            "fps": int(requested.get("fps", 0)),
+            "fourcc": str(requested.get("fourcc", requested.get("preferred_fourcc", "")) or "").strip().upper(),
+        },
+        "selected": {
+            "width": int(selected.get("width", 0)),
+            "height": int(selected.get("height", 0)),
+            "fps": round(float(selected.get("fps", 0.0) or 0.0), 3),
+            "fourcc": selected_fourcc,
+            "candidate_source": str(selected.get("candidate_source", "reported_v4l2")),
+            "report_kind": str(selected.get("report_kind", "reported")),
+            "rank_index": int(selected.get("rank_index", -1)),
         },
         "actual": {
             "width": int(actual_mode.get("width", 0)),
@@ -620,13 +858,13 @@ def _live_camera_negotiation_result(camera_id: str, runtime: Dict[str, Any], att
             "fps": actual_fps,
             "fourcc": actual_fourcc,
         },
-        "requested_fourcc_applied": requested_fourcc != "" and fourcc_matches,
         "matched": {
             "width": width_matches,
             "height": height_matches,
             "fps": fps_matches,
             "fourcc": fourcc_matches,
         },
+        "requested_fourcc_applied": selected_fourcc != "" and fourcc_matches,
         "preferred_backend": backend_name == preferred_backend_name,
         "score": score,
     }
@@ -634,10 +872,14 @@ def _live_camera_negotiation_result(camera_id: str, runtime: Dict[str, Any], att
 
 def _live_camera_negotiation_note(negotiation: Dict[str, Any]) -> str:
     requested = negotiation.get("requested", {}) if isinstance(negotiation.get("requested", {}), dict) else {}
+    selected = negotiation.get("selected", {}) if isinstance(negotiation.get("selected", {}), dict) else {}
     actual = negotiation.get("actual", {}) if isinstance(negotiation.get("actual", {}), dict) else {}
     requested_desc = f"{requested.get('width', 0)}x{requested.get('height', 0)}@{requested.get('fps', 0)}"
     if str(requested.get("fourcc", "")) != "":
         requested_desc += f" {requested.get('fourcc', '')}"
+    selected_desc = f"{selected.get('width', 0)}x{selected.get('height', 0)}@{selected.get('fps', 0)}"
+    if str(selected.get("fourcc", "")) != "":
+        selected_desc += f" {selected.get('fourcc', '')}"
     actual_desc = f"{actual.get('width', 0)}x{actual.get('height', 0)}"
     actual_fps = float(actual.get("fps", 0.0) or 0.0)
     if actual_fps > 0.0:
@@ -647,10 +889,11 @@ def _live_camera_negotiation_note(negotiation: Dict[str, Any]) -> str:
         actual_desc += f" {actual_fourcc}"
     backend = str(negotiation.get("backend", "default"))
     source_label = str(negotiation.get("source_label", "device path"))
+    selection_source = str(selected.get("candidate_source", "reported_v4l2"))
     matches = negotiation.get("matched", {}) if isinstance(negotiation.get("matched", {}), dict) else {}
     if all(bool(matches.get(key, False)) for key in ("width", "height", "fps", "fourcc")):
-        return f"Live camera negotiated requested mode {requested_desc} via {backend}/{source_label}; actual mode is {actual_desc}."
-    return f"Live camera requested mode {requested_desc} via {backend}/{source_label}, but actual mode negotiated as {actual_desc}."
+        return f"Live camera requested {requested_desc}; selected {selected_desc} from {selection_source} via {backend}/{source_label}; actual mode is {actual_desc}."
+    return f"Live camera requested {requested_desc}; selected {selected_desc} from {selection_source} via {backend}/{source_label}, but actual mode negotiated as {actual_desc}."
 
 
 def _read_capture_frame(camera_id: str, capture: Any, source_label: str, read_retries: int, retry_sleep_seconds: float) -> Dict[str, Any]:
@@ -685,7 +928,90 @@ def _read_capture_frame(camera_id: str, capture: Any, source_label: str, read_re
     return {"ok": True, "frame_bgr": frame, "width": width, "height": height}
 
 
-def _select_live_camera_capture_session(camera_id: str, runtime: Dict[str, Any], purpose: str) -> Dict[str, Any]:
+def _apply_live_camera_candidate_settings(cv2: Any, capture: Any, candidate_mode: Dict[str, Any]) -> None:
+    if hasattr(cv2, "CAP_PROP_FRAME_WIDTH"):
+        _safe_capture_set(capture, cv2.CAP_PROP_FRAME_WIDTH, int(candidate_mode.get("width", 0)))
+    if hasattr(cv2, "CAP_PROP_FRAME_HEIGHT"):
+        _safe_capture_set(capture, cv2.CAP_PROP_FRAME_HEIGHT, int(candidate_mode.get("height", 0)))
+    if float(candidate_mode.get("fps", 0.0) or 0.0) > 0.0 and hasattr(cv2, "CAP_PROP_FPS"):
+        _safe_capture_set(capture, cv2.CAP_PROP_FPS, float(candidate_mode.get("fps", 0.0)))
+    encoded_fourcc = _encode_fourcc(cv2, str(candidate_mode.get("fourcc", "")))
+    if encoded_fourcc is not None and hasattr(cv2, "CAP_PROP_FOURCC"):
+        _safe_capture_set(capture, cv2.CAP_PROP_FOURCC, encoded_fourcc)
+
+
+def _probe_live_camera_attempt(cv2: Any, camera_id: str, attempt: Dict[str, Any], purpose: str) -> Dict[str, Any]:
+    capture = _open_opencv_capture(cv2, attempt["capture_source"], str(attempt.get("backend_name", "default")))
+    if not capture.isOpened():
+        try:
+            capture.release()
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "camera_open_failed",
+                "message": f"OpenCV could not open selected camera '{camera_id}' via {attempt['backend_name']}/{attempt['source_label']} for {purpose}",
+            },
+        }
+
+    try:
+        _apply_live_camera_candidate_settings(cv2, capture, attempt.get("candidate_mode", {}))
+        read_result = _read_capture_frame(camera_id, capture, f"{attempt['backend_name']}/{attempt['source_label']}", 5, 0.1 if purpose == "sample capture" else 0.02)
+        if not bool(read_result.get("ok", False)):
+            return read_result
+        actual_mode = _actual_live_camera_mode(cv2, capture, read_result.get("frame_bgr"))
+        negotiation = _live_camera_negotiation_result(camera_id, attempt, actual_mode)
+        return {
+            "ok": True,
+            "cv2": cv2,
+            "capture": capture,
+            "source_label": f"{attempt['backend_name']}/{attempt['source_label']}",
+            "capture_negotiation": negotiation,
+            "notes": [_live_camera_negotiation_note(negotiation)],
+            "initial_frame_bgr": read_result.get("frame_bgr"),
+            "initial_frame_width": int(read_result.get("width", 0)),
+            "initial_frame_height": int(read_result.get("height", 0)),
+        }
+    except Exception:
+        try:
+            capture.release()
+        except Exception:
+            pass
+        raise
+
+
+def _mode_summary_reported_payload(mode_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+    payload: List[Dict[str, Any]] = []
+    for mode in mode_summary.get("reported_options", []):
+        if not isinstance(mode, dict):
+            continue
+        payload.append({
+            "width": int(mode.get("width", 0) or 0),
+            "height": int(mode.get("height", 0) or 0),
+            "fps": round(float(mode.get("fps", 0.0) or 0.0), 3),
+            "fourcc": str(mode.get("fourcc", "") or "").strip().upper(),
+            "candidate_source": str(mode.get("candidate_source", mode_summary.get("reported_source", "reported_v4l2"))),
+            "report_kind": str(mode.get("report_kind", "reported")),
+        })
+    return payload
+
+
+def _camera_options_payload(mode_summary: Dict[str, Any], probed_options: Sequence[Dict[str, Any]], selected: Optional[Dict[str, Any]] = None, actual: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {
+        "selection_policy": "framerate_first_resolution_second_format_backend",
+        "requested": dict(mode_summary.get("requested", {})),
+        "reported_source": str(mode_summary.get("reported_source", "fallback_probe_sweep")),
+        "probe_strategy": str(mode_summary.get("probe_strategy", "bounded_probe_sweep")),
+        "reported_options": _mode_summary_reported_payload(mode_summary),
+        "probed_options": [probe_result.get("capture_negotiation", {}).copy() for probe_result in probed_options if isinstance(probe_result, dict) and isinstance(probe_result.get("capture_negotiation", {}), dict)],
+        "selected": selected.copy() if isinstance(selected, dict) else {},
+        "actual": actual.copy() if isinstance(actual, dict) else {},
+        "notes": list(mode_summary.get("notes", [])),
+    }
+
+
+def _select_live_camera_capture_session(camera_id: str, runtime: Dict[str, Any], purpose: str, include_camera_options: bool = True) -> Dict[str, Any]:
     try:
         import cv2  # type: ignore
     except Exception as exc:
@@ -697,6 +1023,10 @@ def _select_live_camera_capture_session(camera_id: str, runtime: Dict[str, Any],
             },
         }
 
+    preferred_backend_name = _preferred_live_camera_backend_name(cv2, camera_id)
+    mode_summary = _live_camera_reported_mode_summary(camera_id, runtime, preferred_backend_name)
+    attempts = _live_camera_probe_attempts(cv2, camera_id, mode_summary)
+    probe_results: List[Dict[str, Any]] = []
     best_session: Optional[Dict[str, Any]] = None
     last_failure = {
         "ok": False,
@@ -706,75 +1036,47 @@ def _select_live_camera_capture_session(camera_id: str, runtime: Dict[str, Any],
         },
     }
 
-    requested = _live_camera_capture_request(runtime)
-    attempts = _live_camera_capture_attempts(cv2, camera_id, runtime)
     for attempt in attempts:
-        capture = _open_opencv_capture(cv2, attempt["capture_source"], str(attempt.get("backend_name", "default")))
-        if not capture.isOpened():
-            try:
-                capture.release()
-            except Exception:
-                pass
-            last_failure = {
-                "ok": False,
-                "error_info": {
-                    "code": "camera_open_failed",
-                    "message": f"OpenCV could not open selected camera '{camera_id}' via {attempt['backend_name']}/{attempt['source_label']} for {purpose}",
-                },
-            }
+        result = _probe_live_camera_attempt(cv2, camera_id, attempt, purpose)
+        if not bool(result.get("ok", False)):
+            last_failure = result
             continue
-
-        if hasattr(cv2, "CAP_PROP_FRAME_WIDTH"):
-            _safe_capture_set(capture, cv2.CAP_PROP_FRAME_WIDTH, requested["width"])
-        if hasattr(cv2, "CAP_PROP_FRAME_HEIGHT"):
-            _safe_capture_set(capture, cv2.CAP_PROP_FRAME_HEIGHT, requested["height"])
-        if requested["fps"] > 0 and hasattr(cv2, "CAP_PROP_FPS"):
-            _safe_capture_set(capture, cv2.CAP_PROP_FPS, requested["fps"])
-        encoded_fourcc = _encode_fourcc(cv2, str(attempt.get("requested_fourcc", "")))
-        if encoded_fourcc is not None and hasattr(cv2, "CAP_PROP_FOURCC"):
-            _safe_capture_set(capture, cv2.CAP_PROP_FOURCC, encoded_fourcc)
-
-        read_result = _read_capture_frame(camera_id, capture, f"{attempt['backend_name']}/{attempt['source_label']}", 5, 0.1 if purpose == "sample capture" else 0.02)
-        if not bool(read_result.get("ok", False)):
-            try:
-                capture.release()
-            except Exception:
-                pass
-            last_failure = read_result
-            continue
-
-        actual_mode = _actual_live_camera_mode(cv2, capture, read_result.get("frame_bgr"))
-        negotiation = _live_camera_negotiation_result(camera_id, runtime, attempt, actual_mode)
-        session = {
-            "ok": True,
-            "fixture_only": False,
-            "cv2": cv2,
-            "capture": capture,
-            "source_label": f"{attempt['backend_name']}/{attempt['source_label']}",
-            "capture_negotiation": negotiation,
-            "notes": [_live_camera_negotiation_note(negotiation)],
-            "initial_frame_bgr": read_result.get("frame_bgr"),
-            "initial_frame_width": int(read_result.get("width", 0)),
-            "initial_frame_height": int(read_result.get("height", 0)),
-        }
-        if best_session is None or int(negotiation.get("score", 0)) > int(best_session.get("capture_negotiation", {}).get("score", -1)):
+        probe_results.append({
+            "capture_negotiation": result.get("capture_negotiation", {}).copy(),
+            "notes": list(result.get("notes", [])),
+        })
+        if best_session is None or int(result.get("capture_negotiation", {}).get("score", -1)) > int(best_session.get("capture_negotiation", {}).get("score", -1)):
             if best_session is not None:
                 try:
                     best_session["capture"].release()
                 except Exception:
                     pass
-            best_session = session
+            best_session = result
         else:
             try:
-                capture.release()
+                result["capture"].release()
             except Exception:
                 pass
 
-        matched = negotiation.get("matched", {}) if isinstance(negotiation.get("matched", {}), dict) else {}
+        matched = result.get("capture_negotiation", {}).get("matched", {}) if isinstance(result.get("capture_negotiation", {}).get("matched", {}), dict) else {}
         if all(bool(matched.get(key, False)) for key in ("width", "height", "fps", "fourcc")):
             break
 
-    return best_session or last_failure
+    if best_session is None:
+        return last_failure
+
+    selected_mode = best_session.get("capture_negotiation", {}).get("selected", {}) if isinstance(best_session.get("capture_negotiation", {}).get("selected", {}), dict) else {}
+    actual_mode = best_session.get("capture_negotiation", {}).get("actual", {}) if isinstance(best_session.get("capture_negotiation", {}).get("actual", {}), dict) else {}
+    camera_options = _camera_options_payload(mode_summary, probe_results, selected=selected_mode, actual=actual_mode) if include_camera_options else {}
+    best_session["camera_options"] = camera_options
+    negotiation = best_session.get("capture_negotiation", {}).copy()
+    negotiation["selection_policy"] = camera_options.get("selection_policy", "framerate_first_resolution_second_format_backend")
+    negotiation["reported_source"] = camera_options.get("reported_source", "fallback_probe_sweep")
+    negotiation["reported_options"] = camera_options.get("reported_options", [])
+    negotiation["probed_options"] = camera_options.get("probed_options", [])
+    best_session["capture_negotiation"] = negotiation
+    best_session["notes"] = list(mode_summary.get("notes", [])) + list(best_session.get("notes", []))
+    return best_session
 
 
 def _capture_frame_with_opencv_source(cv2: Any, camera_id: str, capture_source: Any, source_label: str) -> Dict[str, Any]:
@@ -851,6 +1153,8 @@ def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any], sample_
             "raw_tracking_frame": _raw_tracking_frame_base("live_camera", camera_id, width, height, timestamp_ms),
             "notes": notes,
             "capture_negotiation": capture_session.get("capture_negotiation", {}),
+        "camera_options": capture_session.get("camera_options", {}),
+            "camera_options": capture_session.get("camera_options", {}),
         }
     finally:
         _close_live_camera_capture_session(capture_session)
@@ -1304,6 +1608,7 @@ def _capture_live_camera_session_sample(camera_id: str, runtime: Dict[str, Any],
         "raw_tracking_frame": _raw_tracking_frame_base("live_camera", camera_id, width, height, _now_ms()),
         "notes": notes,
         "capture_negotiation": capture_session.get("capture_negotiation", {}),
+        "camera_options": capture_session.get("camera_options", {}),
     }
 
 
@@ -1794,6 +2099,44 @@ def _select_source(request: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "runtime": runtime, "source": source, "selected": selected, "selected_camera_id": selected_camera_id, "cameras": cameras, "health": health}
 
 
+def _describe_live_camera_options(request: Dict[str, Any]) -> Dict[str, Any]:
+    selection = _select_source(request)
+    if not bool(selection.get("ok", False)):
+        return selection
+
+    runtime: Dict[str, Any] = selection["runtime"]
+    selected_camera_id = str(selection["selected_camera_id"])
+    try:
+        import cv2  # type: ignore
+        preferred_backend_name = _preferred_live_camera_backend_name(cv2, selected_camera_id)
+    except Exception:
+        preferred_backend_name = "CAP_V4L2" if _is_linux_video_device(selected_camera_id) else "default"
+    mode_summary = _live_camera_reported_mode_summary(selected_camera_id, runtime, preferred_backend_name)
+    camera_options = _camera_options_payload(mode_summary, [], selected={}, actual={})
+    health = selection["health"].copy()
+    health["status"] = "idle"
+    health["healthy"] = True
+    health["notes"] = list(health.get("notes", [])) + list(camera_options.get("notes", []))
+    health["capture_mode"] = {
+        "requested": camera_options.get("requested", {}),
+        "reported_source": camera_options.get("reported_source", "fallback_probe_sweep"),
+        "selection_policy": camera_options.get("selection_policy", "framerate_first_resolution_second_format_backend"),
+        "reported_options": camera_options.get("reported_options", []),
+        "probed_options": [],
+        "selected": {},
+        "actual": {},
+    }
+    return {
+        "ok": True,
+        "cameras": selection.get("cameras", []),
+        "selected_camera_id": selected_camera_id,
+        "health": health,
+        "preview_descriptor": {},
+        "raw_tracking_frame": {},
+        "camera_options": camera_options,
+    }
+
+
 def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
     selection = _select_source(request)
     if not bool(selection.get("ok", False)):
@@ -1875,6 +2218,7 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
         "preview_descriptor": _preview_descriptor(preview, runtime),
         "raw_tracking_frame": raw_tracking_frame,
         "frame_bgr": sampled.get("frame_bgr"),
+        "camera_options": sampled.get("camera_options", {}).copy() if isinstance(sampled.get("camera_options", {}), dict) else {},
     }
 
 
@@ -2130,6 +2474,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
                     },
                     "preview_descriptor": last_preview_descriptor.copy(),
                     "raw_tracking_frame": {},
+                    "camera_options": capture_session.get("camera_options", {}).copy() if isinstance(capture_session.get("camera_options", {}), dict) else {},
                 }
                 _write_session_snapshot(session_dir, shutdown_snapshot)
                 return 0
@@ -2194,6 +2539,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
                 "preview_descriptor": last_preview_descriptor.copy(),
                 "raw_tracking_frame": raw_tracking_frame,
                 "frame_bgr": sampled.get("frame_bgr"),
+                "camera_options": sampled.get("camera_options", {}).copy() if isinstance(sampled.get("camera_options", {}), dict) else {},
             }
 
             now = time.monotonic()
@@ -2232,6 +2578,8 @@ def _success_response(request: Dict[str, Any]) -> Dict[str, Any]:
             "preview_descriptor": {},
             "raw_tracking_frame": {},
         }
+    if operation == "describe_camera_options":
+        return _describe_live_camera_options(request)
     return _sample_once(request)
 
 

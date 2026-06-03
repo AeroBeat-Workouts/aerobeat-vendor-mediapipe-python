@@ -179,6 +179,13 @@ def _fake_legacy_mediapipe_module():
     return {"mediapipe": mp_module}
 
 
+class _FakeCompletedProcess:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
 class MediaPipeRuntimeProbeTests(unittest.TestCase):
     def test_resolve_pose_landmarker_model_path_prefers_explicit_runtime_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -422,7 +429,10 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertEqual(capture_mode["actual"]["fourcc"], "MJPG")
         self.assertEqual(capture_mode["actual"]["width"], 1280)
         self.assertEqual(capture_mode["actual"]["height"], 720)
-        self.assertTrue(any("requested mode 1280x720@30 MJPG" in note for note in result["health"]["notes"]))
+        self.assertTrue(any("requested 1280x720@30 MJPG; selected 1280x720@30.0 MJPG" in note for note in result["health"]["notes"]))
+        self.assertEqual(capture_mode["selected"]["fourcc"], "MJPG")
+        self.assertEqual(capture_mode["reported_source"], "fallback_probe_sweep")
+        self.assertTrue("camera_options" in result)
 
     def test_sample_once_falls_back_when_preferred_linux_mode_is_not_really_negotiated(self):
         request = {
@@ -458,6 +468,7 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertEqual(capture_mode["actual"]["fps"], 30.0)
         self.assertEqual(capture_mode["actual"]["fourcc"], "MJPG")
         self.assertTrue(any("actual mode is 1280x720@30.000 MJPG" in note for note in result["health"]["notes"]))
+        self.assertEqual(capture_mode["selected"]["fps"], 30.0)
 
     def test_sample_once_reduces_optimized_landmark_sets_instead_of_only_hiding_them(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -540,6 +551,109 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertEqual(semantics["overlay_mode"], "optimized")
         self.assertFalse(semantics["filter_enabled"])
         self.assertEqual(semantics["point_mode"], "reduced")
+
+    def test_describe_camera_options_uses_v4l2_reported_modes_as_canonical_source(self):
+        request = {
+            "operation": "describe_camera_options",
+            "runtime": {
+                "working_directory": os.getcwd(),
+                "live_camera_width": 960,
+                "live_camera_height": 540,
+                "live_camera_fps": 30,
+                "live_camera_fourcc": "MJPG",
+                "environment": {
+                    "AEROBEAT_CAMERA_ROOT": "/dev",
+                    "AEROBEAT_CAMERA_PATTERN": "video0",
+                },
+            },
+            "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
+        }
+        stdout = """
+[0]: 'YUYV' (YUYV 4:2:2)
+	Size: Discrete 640x480
+		Interval: Discrete 0.067s (15.000 fps)
+[1]: 'MJPG' (Motion-JPEG)
+	Size: Discrete 1280x720
+		Interval: Discrete 0.033s (30.000 fps)
+	Size: Discrete 960x540
+		Interval: Discrete 0.033s (30.000 fps)
+"""
+        with mock.patch.object(probe.platform, "system", return_value="Linux"):
+            with mock.patch.object(probe.subprocess, "run", return_value=_FakeCompletedProcess(stdout=stdout)):
+                result = probe._success_response(request)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["camera_options"]["reported_source"], "reported_v4l2")
+        self.assertEqual(result["camera_options"]["probe_strategy"], "reported_v4l2_ranked_shortlist")
+        self.assertEqual(result["camera_options"]["reported_options"][0]["fps"], 30.0)
+        self.assertEqual(result["camera_options"]["reported_options"][0]["fourcc"], "MJPG")
+        self.assertEqual(result["health"]["capture_mode"]["reported_options"][0]["fourcc"], "MJPG")
+
+    def test_sample_once_chooses_higher_fps_candidate_over_closer_resolution_when_v4l2_reports_choices(self):
+        request = {
+            "operation": "startup",
+            "runtime": {
+                "working_directory": os.getcwd(),
+                "live_camera_width": 960,
+                "live_camera_height": 540,
+                "live_camera_fps": 30,
+                "live_camera_fourcc": "MJPG",
+                "pose_landmarker_model_path": "unused-for-fake-legacy-path",
+                "environment": {
+                    "AEROBEAT_CAMERA_ROOT": "/dev",
+                    "AEROBEAT_CAMERA_PATTERN": "video0",
+                },
+            },
+            "tracking": {"quality": "full", "overlay_mode": "full"},
+            "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
+            "preview": {"enabled": True},
+        }
+        stdout = """
+[0]: 'MJPG' (Motion-JPEG)
+	Size: Discrete 960x540
+		Interval: Discrete 0.067s (15.000 fps)
+	Size: Discrete 1280x720
+		Interval: Discrete 0.033s (30.000 fps)
+"""
+        _FakeNegotiationCv2.PROFILES = {
+            ("/dev/video0", "CAP_V4L2"): {"opened": True, "width": 1280, "height": 720, "fps": 30.0, "fourcc": "MJPG"},
+        }
+        with mock.patch.object(probe.platform, "system", return_value="Linux"):
+            with mock.patch.object(probe.subprocess, "run", return_value=_FakeCompletedProcess(stdout=stdout)):
+                with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
+                    result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+        self.assertTrue(result["ok"])
+        capture_mode = result["health"]["capture_mode"]
+        self.assertEqual(capture_mode["reported_source"], "reported_v4l2")
+        self.assertEqual(capture_mode["selected"]["width"], 1280)
+        self.assertEqual(capture_mode["selected"]["height"], 720)
+        self.assertEqual(capture_mode["selected"]["fps"], 30.0)
+        self.assertEqual(capture_mode["actual"]["fps"], 30.0)
+        self.assertEqual(result["camera_options"]["reported_options"][0]["width"], 1280)
+
+    def test_describe_camera_options_falls_back_to_bounded_probe_sweep_when_v4l2_is_unavailable(self):
+        request = {
+            "operation": "describe_camera_options",
+            "runtime": {
+                "working_directory": os.getcwd(),
+                "live_camera_width": 960,
+                "live_camera_height": 540,
+                "live_camera_fps": 30,
+                "live_camera_fourcc": "MJPG",
+                "environment": {
+                    "AEROBEAT_CAMERA_ROOT": "/dev",
+                    "AEROBEAT_CAMERA_PATTERN": "video0",
+                },
+            },
+            "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
+        }
+        with mock.patch.object(probe.platform, "system", return_value="Linux"):
+            with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError()):
+                result = probe._success_response(request)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["camera_options"]["reported_source"], "fallback_probe_sweep")
+        self.assertEqual(result["camera_options"]["probe_strategy"], "bounded_probe_sweep")
+        self.assertEqual(result["camera_options"]["reported_options"], [])
+        self.assertGreater(len(result["camera_options"]["notes"]), 0)
 
 
 if __name__ == "__main__":

@@ -72,7 +72,17 @@ Continuous runtime cadence and preview behavior are now controlled by the vendor
 - `runtime.live_camera_fps` — requested live-camera capture FPS during negotiation (defaults mirror tracking max FPS)
 - `runtime.live_camera_fourcc` — preferred live-camera FOURCC for Linux/OpenCV negotiation (`MJPG` by default)
 
-On Linux `/dev/video*` live-camera sessions the runtime now prefers `cv2.CAP_V4L2`, explicitly requests the configured width/height/fps/FOURCC, and reports the truthful negotiated mode back through runtime health under `health.capture_mode` plus human-readable health notes. If the preferred mode is not actually honored, the runtime falls back to the best readable capture path it can prove instead of pretending the requested mode succeeded.
+On Linux `/dev/video*` live-camera sessions the runtime now treats V4L2 enumeration as the canonical reported-options source when `v4l2-ctl` is available, ranks candidates using Derrick's policy (**framerate first, resolution second, then format/backend quality**), and probes only the top shortlist through the actual OpenCV capture path before choosing a mode. When V4L2 enumeration is unavailable, it falls back to a bounded sane probe sweep instead of pretending the camera supports an arbitrary request.
+
+The runtime reports that truth back through `health.capture_mode` and `camera_options`, distinguishing:
+
+- the original requested mode
+- the reported options returned by V4L2 (when available)
+- the successfully probed shortlist results
+- the selected candidate mode
+- the actual negotiated mode OpenCV delivered
+
+`MediaPipePythonRuntimeBridge` and `MediaPipePythonCameraTrackingBackend` also expose a vendor-owned `describe_camera_options` / `get_camera_options` capability so higher layers can request the current camera's reported/proven combination options without talking to the Python entrypoint directly.
 
 If the host only exposes the tasks-era MediaPipe API and no usable model asset is available, the runtime fails honestly with `mediapipe_model_missing` instead of pretending inference ran.
 

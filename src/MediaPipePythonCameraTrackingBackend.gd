@@ -16,6 +16,7 @@ var _active_config: Dictionary = CameraTrackingConfig.defaults()
 var _vendor_runtime_config: Dictionary = MediaPipePythonConfig.make_vendor_runtime_config()
 var _tracking_frame: Dictionary = MediaPipePythonFrameMapper.empty(_active_config)
 var _preview_descriptor: Dictionary = _make_preview_descriptor({})
+var _camera_options: Dictionary = {}
 var _playback_status: Dictionary = {}
 var _runtime_health: Dictionary = MediaPipePythonRuntimeHealth.unavailable()
 var _cameras: Array = []
@@ -68,6 +69,7 @@ func stop() -> void:
 	_runtime_health = MediaPipePythonRuntimeHealth.make(snapshot.get("health", {}))
 	_tracking_frame = MediaPipePythonFrameMapper.empty(_active_config)
 	_preview_descriptor = _make_preview_descriptor({})
+	_camera_options = {}
 	_playback_status = {}
 	_state = CameraTracking.STATE_IDLE
 	_detail = CameraTrackingConfig.make_state_detail()
@@ -115,6 +117,20 @@ func get_preview_descriptor() -> Dictionary:
 	_refresh_runtime_snapshot_if_running()
 	return _preview_descriptor.duplicate(true)
 
+func get_camera_options(camera_id: String = "") -> Dictionary:
+	if _bridge == null:
+		return _camera_options.duplicate(true)
+	if camera_id == "" and _state == CameraTracking.STATE_RUNNING:
+		_refresh_runtime_snapshot_if_running()
+		if not _camera_options.is_empty():
+			return _camera_options.duplicate(true)
+	if _bridge.has_method("describe_camera_options"):
+		var snapshot: Dictionary = _bridge.describe_camera_options(camera_id)
+		if bool(snapshot.get("ok", false)):
+			_camera_options = snapshot.get("camera_options", {}).duplicate(true)
+			_runtime_health = MediaPipePythonRuntimeHealth.make(snapshot.get("health", _runtime_health))
+	return _camera_options.duplicate(true)
+
 func get_playback_status() -> Dictionary:
 	_refresh_runtime_snapshot_if_running()
 	return _playback_status.duplicate(true)
@@ -143,6 +159,7 @@ func _refresh_runtime_snapshot_if_running() -> void:
 	_cameras = MediaPipePythonCameraInventory.normalize(snapshot.get("cameras", []))
 	_tracking_frame = MediaPipePythonFrameMapper.map_raw_frame(snapshot.get("raw_tracking_frame", {}), _active_config)
 	_preview_descriptor = _make_preview_descriptor(snapshot.get("preview_descriptor", {}))
+	_camera_options = snapshot.get("camera_options", {}).duplicate(true)
 	_playback_status = snapshot.get("playback_status", {}).duplicate(true)
 	_detail = _make_state_detail()
 
@@ -161,6 +178,7 @@ func _apply_runtime_snapshot(snapshot: Dictionary, success_state: String) -> voi
 	_cameras = MediaPipePythonCameraInventory.normalize(snapshot.get("cameras", []))
 	_tracking_frame = MediaPipePythonFrameMapper.map_raw_frame(snapshot.get("raw_tracking_frame", {}), _active_config)
 	_preview_descriptor = _make_preview_descriptor(snapshot.get("preview_descriptor", {}))
+	_camera_options = snapshot.get("camera_options", {}).duplicate(true)
 	_playback_status = snapshot.get("playback_status", {}).duplicate(true)
 	_detail = _make_state_detail()
 	_state = success_state
