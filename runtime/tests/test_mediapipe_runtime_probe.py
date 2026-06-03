@@ -755,6 +755,87 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertTrue(any("runtime observed ~22.500 FPS after OpenCV reported 30.000 FPS" in note for note in capture_session["notes"]))
         probe._close_live_camera_capture_session(capture_session)
 
+    def test_arm_owner_orphan_protection_uses_linux_parent_death_signal(self):
+        class _FakePrctl:
+            def __init__(self):
+                self.calls = []
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, option, signal_number, arg3, arg4, arg5):
+                self.calls.append((option, signal_number, arg3, arg4, arg5))
+                return 0
+
+        fake_prctl = _FakePrctl()
+        fake_libc = types.SimpleNamespace(prctl=fake_prctl)
+        fake_ctypes = types.SimpleNamespace(CDLL=lambda *_args, **_kwargs: fake_libc, c_int=int, c_ulong=int, get_errno=lambda: 0)
+        with mock.patch.object(probe, "_reset_runtime_shutdown_state") as reset_mock:
+            with mock.patch.object(probe.os, "getppid", side_effect=[4242, 4242]):
+                with mock.patch.object(probe.platform, "system", return_value="Linux"):
+                    with mock.patch.object(probe.signal, "signal") as signal_mock:
+                        with mock.patch.dict("sys.modules", {"ctypes": fake_ctypes}):
+                            result = probe._arm_owner_orphan_protection()
+        reset_mock.assert_called_once_with()
+        signal_mock.assert_called_once_with(probe.signal.SIGTERM, probe._handle_runtime_shutdown_signal)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["parent_pid"], 4242)
+        self.assertEqual(fake_prctl.calls, [(probe._PR_SET_PDEATHSIG, int(probe.signal.SIGTERM), 0, 0, 0)])
+
+    def test_arm_owner_orphan_protection_requests_shutdown_if_parent_already_disappeared(self):
+        class _FakePrctl:
+            argtypes = None
+            restype = None
+
+            def __call__(self, option, signal_number, arg3, arg4, arg5):
+                self.last_call = (option, signal_number, arg3, arg4, arg5)
+                return 0
+
+        fake_libc = types.SimpleNamespace(prctl=_FakePrctl())
+        fake_ctypes = types.SimpleNamespace(CDLL=lambda *_args, **_kwargs: fake_libc, c_int=int, c_ulong=int, get_errno=lambda: 0)
+        probe._reset_runtime_shutdown_state()
+        with mock.patch.object(probe.os, "getppid", side_effect=[4242, 1]):
+            with mock.patch.object(probe.platform, "system", return_value="Linux"):
+                with mock.patch.object(probe.signal, "signal"):
+                    with mock.patch.dict("sys.modules", {"ctypes": fake_ctypes}):
+                        result = probe._arm_owner_orphan_protection()
+        self.assertTrue(result["ok"])
+        self.assertEqual(probe._runtime_shutdown_reason(), "owner_process_disappeared")
+
+    def test_run_continuous_session_exits_cleanly_when_owner_disappears(self):
+        request = {
+            "runtime": {},
+            "preview": {},
+            "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
+        }
+        selection = {
+            "ok": True,
+            "selected_camera_id": "/dev/video0",
+            "selected": {"available": True, "label": "Fake Camera"},
+            "cameras": [{"camera_id": "/dev/video0"}],
+            "health": {"notes": []},
+        }
+        capture_session = {
+            "ok": True,
+            "fixture_only": True,
+            "notes": ["Capture session opened."],
+            "capture_negotiation": {"selected": {"width": 640, "height": 480}},
+            "camera_options": {"reported_source": "fixture"},
+        }
+        snapshots = []
+        with tempfile.TemporaryDirectory() as session_dir:
+            with mock.patch.object(probe, "_arm_owner_orphan_protection", side_effect=lambda: probe._request_runtime_shutdown("owner_process_disappeared")):
+                with mock.patch.object(probe, "_select_source", return_value=selection):
+                    with mock.patch.object(probe, "_open_live_camera_capture_session", return_value=capture_session):
+                        with mock.patch.object(probe, "_capture_live_camera_session_sample", side_effect=AssertionError("capture should not run after orphan shutdown request")):
+                            with mock.patch.object(probe, "_enumerate_cameras", return_value=[{"camera_id": "/dev/video0"}]):
+                                with mock.patch.object(probe, "_write_session_snapshot", side_effect=lambda _session_dir, payload: snapshots.append(payload)):
+                                    exit_code = probe._run_continuous_session(request, session_dir)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["health"]["status"], "idle")
+        self.assertFalse(snapshots[0]["health"]["process_active"])
+        self.assertIn("owner process disappeared unexpectedly", snapshots[0]["health"]["notes"][-1])
+
 
 if __name__ == "__main__":
     unittest.main()

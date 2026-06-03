@@ -6,6 +6,7 @@ import math
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -29,6 +30,95 @@ _DEFAULT_PREVIEW_MAX_FPS = 30
 _DEFAULT_PREVIEW_WIDTH = 960
 _DEFAULT_PREVIEW_HEIGHT = 540
 _DEFAULT_PREVIEW_QUALITY = 75
+
+_PR_SET_PDEATHSIG = 1
+_RUNTIME_SHUTDOWN_REQUESTED = False
+_RUNTIME_SHUTDOWN_REASON = ""
+_OWNER_PARENT_PID: Optional[int] = None
+_OWNER_PARENT_DEATH_SIGNAL_ARMED = False
+
+
+def _reset_runtime_shutdown_state() -> None:
+    global _RUNTIME_SHUTDOWN_REQUESTED, _RUNTIME_SHUTDOWN_REASON, _OWNER_PARENT_PID, _OWNER_PARENT_DEATH_SIGNAL_ARMED
+    _RUNTIME_SHUTDOWN_REQUESTED = False
+    _RUNTIME_SHUTDOWN_REASON = ""
+    _OWNER_PARENT_PID = None
+    _OWNER_PARENT_DEATH_SIGNAL_ARMED = False
+
+
+def _request_runtime_shutdown(reason: str) -> None:
+    global _RUNTIME_SHUTDOWN_REQUESTED, _RUNTIME_SHUTDOWN_REASON
+    _RUNTIME_SHUTDOWN_REQUESTED = True
+    _RUNTIME_SHUTDOWN_REASON = str(reason).strip() or "signal"
+
+
+def _runtime_shutdown_reason() -> str:
+    return _RUNTIME_SHUTDOWN_REASON if _RUNTIME_SHUTDOWN_REQUESTED else ""
+
+
+def _handle_runtime_shutdown_signal(signum: int, _frame: Any) -> None:
+    current_parent_pid = os.getppid()
+    if _OWNER_PARENT_DEATH_SIGNAL_ARMED and _OWNER_PARENT_PID not in (None, 0) and current_parent_pid != _OWNER_PARENT_PID:
+        _request_runtime_shutdown("owner_process_disappeared")
+        return
+    _request_runtime_shutdown(f"signal_{int(signum)}")
+
+
+def _arm_owner_orphan_protection() -> Dict[str, Any]:
+    global _OWNER_PARENT_PID, _OWNER_PARENT_DEATH_SIGNAL_ARMED
+
+    _reset_runtime_shutdown_state()
+    _OWNER_PARENT_PID = os.getppid()
+    signal.signal(signal.SIGTERM, _handle_runtime_shutdown_signal)
+
+    if platform.system() != "Linux":
+        return {
+            "ok": False,
+            "code": "owner_orphan_protection_unsupported_platform",
+            "message": "Owner orphan protection is only armed on Linux hosts.",
+            "parent_pid": _OWNER_PARENT_PID,
+        }
+
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        prctl = getattr(libc, "prctl", None)
+        if prctl is None:
+            return {
+                "ok": False,
+                "code": "owner_orphan_protection_unavailable",
+                "message": "libc prctl is unavailable; cannot arm Linux parent-death signal.",
+                "parent_pid": _OWNER_PARENT_PID,
+            }
+        prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        prctl.restype = ctypes.c_int
+        if prctl(_PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0) != 0:
+            errno_value = ctypes.get_errno()
+            return {
+                "ok": False,
+                "code": "owner_orphan_protection_arm_failed",
+                "message": os.strerror(errno_value) if errno_value else "Failed to arm Linux parent-death signal.",
+                "errno": errno_value,
+                "parent_pid": _OWNER_PARENT_PID,
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "code": "owner_orphan_protection_exception",
+            "message": str(exc),
+            "parent_pid": _OWNER_PARENT_PID,
+        }
+
+    _OWNER_PARENT_DEATH_SIGNAL_ARMED = True
+    if os.getppid() != _OWNER_PARENT_PID:
+        _request_runtime_shutdown("owner_process_disappeared")
+    return {
+        "ok": True,
+        "parent_pid": _OWNER_PARENT_PID,
+        "signal": "SIGTERM",
+        "signal_number": int(signal.SIGTERM),
+    }
 
 
 def _now_iso() -> str:
@@ -1215,7 +1305,6 @@ def _capture_live_camera_sample(camera_id: str, runtime: Dict[str, Any], sample_
             "raw_tracking_frame": _raw_tracking_frame_base("live_camera", camera_id, width, height, timestamp_ms),
             "notes": notes,
             "capture_negotiation": capture_session.get("capture_negotiation", {}),
-        "camera_options": capture_session.get("camera_options", {}),
             "camera_options": capture_session.get("camera_options", {}),
         }
     finally:
@@ -1304,6 +1393,7 @@ def _replay_eof_snapshot(request: Dict[str, Any], selected_source_id: str, loop_
 
 
 def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
+    _arm_owner_orphan_protection()
     os.makedirs(session_dir, exist_ok=True)
     _write_json_atomic(_session_request_path(session_dir), request)
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
@@ -1396,6 +1486,32 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                         "healthy": True,
                         "selected_camera_id": video_path,
                         "notes": [f"Replay session for '{video_path}' stopped cleanly."],
+                    },
+                    "preview_descriptor": last_preview_descriptor.copy(),
+                    "playback_status": _playback_status(video_path, start_time_sec, duration_sec, "paused", True),
+                    "raw_tracking_frame": {},
+                }
+                _write_session_snapshot(session_dir, shutdown_snapshot)
+                return 0
+            if _runtime_shutdown_reason() != "":
+                shutdown_note = f"Replay session for '{video_path}' exited because its owner process disappeared unexpectedly."
+                if _runtime_shutdown_reason() != "owner_process_disappeared":
+                    shutdown_note = f"Replay session for '{video_path}' exited after receiving {_runtime_shutdown_reason()}."
+                shutdown_snapshot = {
+                    "ok": True,
+                    "cameras": _enumerate_cameras(runtime),
+                    "selected_camera_id": video_path,
+                    "health": {
+                        **_base_health(_runtime_shutdown_reason(), runtime),
+                        "status": "idle",
+                        "runtime_available": True,
+                        "bridge_connected": True,
+                        "process_active": False,
+                        "camera_accessible": True,
+                        "tracking_active": False,
+                        "healthy": True,
+                        "selected_camera_id": video_path,
+                        "notes": [shutdown_note],
                     },
                     "preview_descriptor": last_preview_descriptor.copy(),
                     "playback_status": _playback_status(video_path, start_time_sec, duration_sec, "paused", True),
@@ -2415,6 +2531,31 @@ def _write_session_snapshot(session_dir: str, payload: Dict[str, Any]) -> None:
     _write_json_atomic(_session_snapshot_path(session_dir), payload)
 
 
+def _continuous_shutdown_snapshot(request: Dict[str, Any], runtime: Dict[str, Any], selected_camera_id: str, selected: Dict[str, Any], capture_session: Dict[str, Any], last_preview_descriptor: Dict[str, Any], note: str, note_code: str = "shutdown") -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "cameras": _enumerate_cameras(runtime),
+        "selected_camera_id": selected_camera_id,
+        "health": {
+            **_base_health(note_code, runtime),
+            "status": "idle",
+            "runtime_available": True,
+            "bridge_connected": True,
+            "process_active": False,
+            "camera_accessible": bool(selected.get("available", False)),
+            "tracking_active": False,
+            "healthy": True,
+            "selected_camera_id": selected_camera_id,
+            "selected_camera_label": selected.get("label", selected_camera_id),
+            "notes": list(capture_session.get("notes", [])) + [note],
+            "capture_mode": capture_session.get("capture_negotiation", {}),
+        },
+        "preview_descriptor": last_preview_descriptor.copy(),
+        "raw_tracking_frame": {},
+        "camera_options": capture_session.get("camera_options", {}).copy() if isinstance(capture_session.get("camera_options", {}), dict) else {},
+    }
+
+
 def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any], sample_index: int, loop_started_ms: int, session_dir: str = "", include_preview_frame: bool = True, existing_preview_descriptor: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     snapshot = sampled.copy()
     health = snapshot.get("health", {}).copy()
@@ -2494,6 +2635,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
     last_state_write_at: Optional[float] = None
     last_preview_write_at: Optional[float] = None
     last_preview_descriptor = _preview_descriptor(preview, runtime)
+    _arm_owner_orphan_protection()
 
     selection = _select_source(request)
     if not bool(selection.get("ok", False)):
@@ -2538,28 +2680,31 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
         while True:
             iteration_started_at = time.monotonic()
             if os.path.exists(_session_stop_path(session_dir)):
-                shutdown_snapshot = {
-                    "ok": True,
-                    "cameras": _enumerate_cameras(runtime),
-                    "selected_camera_id": selected_camera_id,
-                    "health": {
-                        **_base_health("shutdown", runtime),
-                        "status": "idle",
-                        "runtime_available": True,
-                        "bridge_connected": True,
-                        "process_active": False,
-                        "camera_accessible": bool(selected.get("available", False)),
-                        "tracking_active": False,
-                        "healthy": True,
-                        "selected_camera_id": selected_camera_id,
-                        "selected_camera_label": selected.get("label", selected_camera_id),
-                        "notes": list(capture_session.get("notes", [])) + ["Continuous MediaPipe runtime session stopped cleanly."],
-                        "capture_mode": capture_session.get("capture_negotiation", {}),
-                    },
-                    "preview_descriptor": last_preview_descriptor.copy(),
-                    "raw_tracking_frame": {},
-                    "camera_options": capture_session.get("camera_options", {}).copy() if isinstance(capture_session.get("camera_options", {}), dict) else {},
-                }
+                shutdown_snapshot = _continuous_shutdown_snapshot(
+                    request,
+                    runtime,
+                    selected_camera_id,
+                    selected,
+                    capture_session,
+                    last_preview_descriptor,
+                    "Continuous MediaPipe runtime session stopped cleanly.",
+                )
+                _write_session_snapshot(session_dir, shutdown_snapshot)
+                return 0
+            if _runtime_shutdown_reason() != "":
+                shutdown_note = "Continuous MediaPipe runtime session exited because its owner process disappeared unexpectedly."
+                if _runtime_shutdown_reason() != "owner_process_disappeared":
+                    shutdown_note = f"Continuous MediaPipe runtime session exited after receiving {_runtime_shutdown_reason()}."
+                shutdown_snapshot = _continuous_shutdown_snapshot(
+                    request,
+                    runtime,
+                    selected_camera_id,
+                    selected,
+                    capture_session,
+                    last_preview_descriptor,
+                    shutdown_note,
+                    _runtime_shutdown_reason(),
+                )
                 _write_session_snapshot(session_dir, shutdown_snapshot)
                 return 0
 
