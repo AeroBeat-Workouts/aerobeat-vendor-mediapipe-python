@@ -155,6 +155,11 @@ func _refresh_runtime_snapshot_if_running() -> void:
 		_detail = _make_state_detail()
 		_state = CameraTracking.STATE_ERROR
 		return
+
+	var previous_cameras := _cameras.duplicate(true)
+	var previous_tracking_frame := _tracking_frame.duplicate(true)
+	var previous_preview_descriptor := _preview_descriptor.duplicate(true)
+
 	_runtime_health = MediaPipePythonRuntimeHealth.make(snapshot.get("health", {}))
 	_cameras = MediaPipePythonCameraInventory.normalize(snapshot.get("cameras", []))
 	_tracking_frame = MediaPipePythonFrameMapper.map_raw_frame(snapshot.get("raw_tracking_frame", {}), _active_config)
@@ -162,6 +167,13 @@ func _refresh_runtime_snapshot_if_running() -> void:
 	_camera_options = snapshot.get("camera_options", {}).duplicate(true)
 	_playback_status = snapshot.get("playback_status", {}).duplicate(true)
 	_detail = _make_state_detail()
+
+	if _preview_descriptor != previous_preview_descriptor:
+		emit_signal("preview_changed", _preview_descriptor.duplicate(true))
+	if _tracking_frame != previous_tracking_frame:
+		emit_signal("tracking_updated", _tracking_frame.duplicate(true))
+	if _cameras != previous_cameras:
+		emit_signal("cameras_changed", _cameras.duplicate(true))
 
 func _apply_runtime_snapshot(snapshot: Dictionary, success_state: String) -> void:
 	if bool(snapshot.get("ok", false)) == false:

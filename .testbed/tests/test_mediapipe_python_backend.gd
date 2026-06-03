@@ -174,8 +174,16 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 	backend.set_runtime_bridge(bridge)
 
 	var observed_states: Array = []
+	var observed_preview_events: Array = []
+	var observed_tracking_events: Array = []
 	backend.state_changed.connect(func(state: String, detail: Dictionary) -> void:
 		observed_states.append({"state": state, "detail": detail.duplicate(true)})
+	)
+	backend.preview_changed.connect(func(descriptor: Dictionary) -> void:
+		observed_preview_events.append(descriptor.duplicate(true))
+	)
+	backend.tracking_updated.connect(func(frame: Dictionary) -> void:
+		observed_tracking_events.append(frame.duplicate(true))
 	)
 
 	backend.start({
@@ -196,12 +204,20 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 	assert_eq(backend.get_preview_descriptor()["backend"], "mediapipe_python")
 	assert_eq(backend.list_cameras()[0]["camera_id"], "/dev/video0")
 	assert_eq(bridge.startup_configs[0]["runtime"]["entrypoint"], "python/main.py")
+	assert_eq(observed_preview_events.size(), 1)
+	assert_eq(observed_tracking_events.size(), 1)
 
 	bridge.raw_tracking_frame["timestamp_ms"] = 456
 	bridge.raw_tracking_frame["tracking_state"] = "idle"
+	bridge.preview_descriptor["image_path"] = "user://preview-frame.jpg"
+	bridge.preview_descriptor["image_revision"] = 2
 	var refreshed := backend.get_tracking_frame()
 	assert_eq(int(refreshed["timestamp_ms"]), 456)
 	assert_eq(refreshed["tracking_state"], "idle")
+	assert_eq(observed_tracking_events.size(), 2)
+	assert_eq(observed_preview_events.size(), 2)
+	assert_eq(observed_preview_events.back()["image_path"], "user://preview-frame.jpg")
+	assert_eq(int(observed_preview_events.back()["image_revision"]), 2)
 
 	backend.change({
 		"source": {"kind": "video_file", "path": "res://clips/demo.mp4"},
