@@ -208,6 +208,7 @@ func poll_snapshot() -> Dictionary:
 		"preview_descriptor": _last_preview_descriptor.duplicate(true),
 		"playback_status": _last_playback_status.duplicate(true),
 		"raw_tracking_frame": _last_raw_tracking_frame.duplicate(true),
+		"camera_options": _last_camera_options.duplicate(true),
 		"error_info": snapshot.get("error_info", {}).duplicate(true)
 	}
 
