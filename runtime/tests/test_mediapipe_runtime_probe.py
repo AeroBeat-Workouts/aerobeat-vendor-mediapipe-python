@@ -302,6 +302,38 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertEqual(second["raw_tracking_frame"]["source_kind"], "video_file")
             self.assertFalse("landmarks" in second["raw_tracking_frame"])
 
+    def test_sample_once_omits_non_json_frame_payload_from_response(self):
+        request = {
+            "operation": "startup",
+            "runtime": {"working_directory": os.getcwd()},
+            "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
+            "preview": {"enabled": True},
+        }
+        non_json_frame = object()
+        with mock.patch.object(probe, "_select_source", return_value={
+            "ok": True,
+            "runtime": request["runtime"],
+            "source": request["source"],
+            "selected_camera_id": "/dev/video0",
+            "cameras": [{"id": "/dev/video0", "label": "Camera 0"}],
+            "health": {"notes": [], "status": "ok"},
+        }):
+            with mock.patch.object(probe, "_capture_live_camera_sample", return_value={
+                "ok": True,
+                "frame_bgr": non_json_frame,
+                "raw_tracking_frame": {"source_kind": "live_camera", "source_id": "/dev/video0", "tracking_state": "idle"},
+                "camera_options": {},
+            }):
+                with mock.patch.object(probe, "_infer_pose_landmarks", return_value={
+                    "ok": True,
+                    "notes": ["No landmarks for this sample."],
+                    "raw_tracking_frame": {"source_kind": "live_camera", "source_id": "/dev/video0", "tracking_state": "idle"},
+                }):
+                    result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+        self.assertTrue(result["ok"])
+        self.assertNotIn("frame_bgr", result)
+        self.assertEqual(json.loads(json.dumps(result))["selected_camera_id"], "/dev/video0")
+
     def test_run_continuous_video_file_session_writes_idle_snapshot_after_fixture_eof(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             video_path = Path(temp_dir) / "fixture.mp4"

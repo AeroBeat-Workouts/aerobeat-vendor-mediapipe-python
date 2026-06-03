@@ -2302,7 +2302,6 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
         "health": health,
         "preview_descriptor": _preview_descriptor(preview, runtime),
         "raw_tracking_frame": raw_tracking_frame,
-        "frame_bgr": sampled.get("frame_bgr"),
         "camera_options": sampled.get("camera_options", {}).copy() if isinstance(sampled.get("camera_options", {}), dict) else {},
     }
 
