@@ -55,7 +55,7 @@ func start(config: Dictionary) -> void:
 	_runtime_health = MediaPipePythonRuntimeHealth.starting()
 	_apply_runtime_snapshot(_bridge.startup(_vendor_runtime_config), CameraTracking.STATE_RUNNING)
 
-func stop() -> void:
+func stop(preserve_runtime_state: bool = false) -> void:
 	_state = CameraTracking.STATE_STOPPING
 	_detail = _make_state_detail()
 	emit_signal("state_changed", _state, _detail.duplicate(true))
@@ -67,14 +67,20 @@ func stop() -> void:
 		})
 	}
 	_runtime_health = MediaPipePythonRuntimeHealth.make(snapshot.get("health", {}))
-	_tracking_frame = MediaPipePythonFrameMapper.empty(_active_config)
-	_preview_descriptor = _make_preview_descriptor({})
-	_camera_options = {}
-	_playback_status = {}
+	if preserve_runtime_state:
+		_playback_status = _paused_playback_status(_playback_status)
+	else:
+		_tracking_frame = MediaPipePythonFrameMapper.empty(_active_config)
+		_preview_descriptor = _make_preview_descriptor({})
+		_camera_options = {}
+		_playback_status = {}
 	_state = CameraTracking.STATE_IDLE
 	_detail = CameraTrackingConfig.make_state_detail()
 	emit_signal("preview_changed", _preview_descriptor.duplicate(true))
 	emit_signal("state_changed", _state, _detail.duplicate(true))
+
+func stop_preserving_runtime_state() -> void:
+	stop(true)
 
 func change(config: Dictionary) -> void:
 	_active_config = CameraTrackingConfig.normalize(config)
@@ -133,6 +139,14 @@ func get_camera_options(camera_id: String = "") -> Dictionary:
 
 func get_playback_status() -> Dictionary:
 	return _playback_status.duplicate(true)
+
+func _paused_playback_status(status: Dictionary) -> Dictionary:
+	if status.is_empty():
+		return {}
+	var paused_status := status.duplicate(true)
+	paused_status["paused"] = true
+	paused_status["state"] = "paused"
+	return paused_status
 
 func _refresh_runtime_snapshot_if_running() -> void:
 	if _bridge == null:

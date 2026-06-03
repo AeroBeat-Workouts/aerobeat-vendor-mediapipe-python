@@ -1420,6 +1420,8 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     fixture_map = _sample_fixture_map(runtime)
     use_fixture_sequence = isinstance(fixture_map.get(video_path), dict)
     replay_start_time_sec = max(0.0, float(source.get("start_time_sec", 0.0) or 0.0))
+    replay_loop_start_raw = source.get("loop_start_time_sec", replay_start_time_sec)
+    replay_loop_start_time_sec = max(0.0, float(replay_loop_start_raw if replay_loop_start_raw is not None else replay_start_time_sec))
     loop_enabled = bool(source.get("loop", False))
     fixture_frame_index = 0
     duration_sec = 0.0
@@ -1545,7 +1547,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 assert capture is not None
                 ok, frame = capture.read()
                 if not ok or frame is None:
-                    if loop_enabled and _rewind_replay_capture(capture, cv2, replay_start_time_sec):
+                    if loop_enabled and _rewind_replay_capture(capture, cv2, replay_loop_start_time_sec):
                         continue
                     eof_snapshot = _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index)
                     eof_snapshot["preview_descriptor"] = last_preview_descriptor.copy()
@@ -1620,7 +1622,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 health["notes"].append("Returning no raw landmarks because the replay frame did not produce a pose.")
             current_time_sec = replay_start_time_sec
             if capture is not None and cv2 is not None:
-                current_time_sec = max(replay_start_time_sec, float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0)
+                current_time_sec = max(0.0, float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0)
 
             sampled_snapshot = {
                 "ok": True,
