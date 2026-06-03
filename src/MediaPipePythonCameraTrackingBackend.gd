@@ -132,7 +132,6 @@ func get_camera_options(camera_id: String = "") -> Dictionary:
 	return _camera_options.duplicate(true)
 
 func get_playback_status() -> Dictionary:
-	_refresh_runtime_snapshot_if_running()
 	return _playback_status.duplicate(true)
 
 func _refresh_runtime_snapshot_if_running() -> void:

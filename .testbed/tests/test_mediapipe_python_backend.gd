@@ -43,6 +43,15 @@ class FakeRuntimeBridge extends "res://../src/MediaPipePythonRuntimeBridge.gd":
 		"tracking_active": true,
 		"process_active": true
 	})
+	var playback_status := {
+		"source": "",
+		"state": "paused",
+		"paused": true,
+		"current_time_sec": 0.0,
+		"duration_sec": 0.0,
+		"progress": 0.0,
+		"is_file_source": false,
+	}
 
 	func startup(vendor_config: Dictionary) -> Dictionary:
 		startup_configs.append(vendor_config.duplicate(true))
@@ -56,12 +65,16 @@ class FakeRuntimeBridge extends "res://../src/MediaPipePythonRuntimeBridge.gd":
 			snapshot_frame["source_kind"] = "live_camera"
 			snapshot_frame["source_id"] = str(source.get("camera_id", snapshot_frame.get("source_id", "/dev/video0")))
 		raw_tracking_frame = snapshot_frame.duplicate(true)
+		var snapshot_playback_status := playback_status.duplicate(true)
+		snapshot_playback_status["source"] = snapshot_frame.get("source_id", "")
+		snapshot_playback_status["is_file_source"] = source_kind == "video_file"
 		return {
 			"ok": true,
 			"health": health.duplicate(true),
 			"cameras": cameras.duplicate(true),
 			"preview_descriptor": preview_descriptor.duplicate(true),
-			"raw_tracking_frame": snapshot_frame
+			"raw_tracking_frame": snapshot_frame,
+			"playback_status": snapshot_playback_status,
 		}
 
 	func shutdown() -> Dictionary:
@@ -89,7 +102,8 @@ class FakeRuntimeBridge extends "res://../src/MediaPipePythonRuntimeBridge.gd":
 			"health": health.duplicate(true),
 			"cameras": cameras.duplicate(true),
 			"preview_descriptor": preview_descriptor.duplicate(true),
-			"raw_tracking_frame": raw_tracking_frame.duplicate(true)
+			"raw_tracking_frame": raw_tracking_frame.duplicate(true),
+			"playback_status": playback_status.duplicate(true),
 		}
 
 func test_vendor_runtime_config_translation_keeps_public_shape_and_vendor_overrides() -> void:
@@ -186,6 +200,15 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 		observed_tracking_events.append(frame.duplicate(true))
 	)
 
+	bridge.playback_status = {
+		"source": "/dev/video0",
+		"state": "playing",
+		"paused": false,
+		"current_time_sec": 1.25,
+		"duration_sec": 5.0,
+		"progress": 0.25,
+		"is_file_source": false,
+	}
 	backend.start({
 		"source": {"camera_id": "/dev/video0"},
 		"runtime": {"entrypoint": "python/main.py"}
@@ -202,6 +225,8 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 	assert_eq(backend.get_tracking_frame()["confidence"], 0.0)
 	assert_eq(backend.get_tracking_frame()["landmarks"].size(), 2)
 	assert_eq(backend.get_preview_descriptor()["backend"], "mediapipe_python")
+	assert_eq(backend.get_playback_status().get("current_time_sec"), 1.25)
+	assert_eq(backend.get_playback_status().get("progress"), 0.25)
 	assert_eq(backend.list_cameras()[0]["camera_id"], "/dev/video0")
 	assert_eq(bridge.startup_configs[0]["runtime"]["entrypoint"], "python/main.py")
 	assert_eq(observed_preview_events.size(), 1)
@@ -211,9 +236,13 @@ func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> 
 	bridge.raw_tracking_frame["tracking_state"] = "idle"
 	bridge.preview_descriptor["image_path"] = "user://preview-frame.jpg"
 	bridge.preview_descriptor["image_revision"] = 2
+	bridge.playback_status["current_time_sec"] = 2.5
+	bridge.playback_status["progress"] = 0.5
 	var refreshed := backend.get_tracking_frame()
 	assert_eq(int(refreshed["timestamp_ms"]), 456)
 	assert_eq(refreshed["tracking_state"], "idle")
+	assert_eq(backend.get_playback_status().get("current_time_sec"), 2.5)
+	assert_eq(backend.get_playback_status().get("progress"), 0.5)
 	assert_eq(observed_tracking_events.size(), 2)
 	assert_eq(observed_preview_events.size(), 2)
 	assert_eq(observed_preview_events.back()["image_path"], "user://preview-frame.jpg")
