@@ -8,6 +8,7 @@ const MediaPipePythonRuntimeBridge = preload("MediaPipePythonRuntimeBridge.gd")
 const MediaPipePythonRuntimeHealth = preload("MediaPipePythonRuntimeHealth.gd")
 const MediaPipePythonFrameMapper = preload("MediaPipePythonFrameMapper.gd")
 const MediaPipePythonCameraInventory = preload("MediaPipePythonCameraInventory.gd")
+const _SHUTDOWN_TRACE_PREFIX := "[CameraShutdownTrace][MediaPipePythonBackend]"
 
 var _bridge = null
 var _state: String = CameraTracking.STATE_IDLE
@@ -56,6 +57,10 @@ func start(config: Dictionary) -> void:
 	_apply_runtime_snapshot(_bridge.startup(_vendor_runtime_config), CameraTracking.STATE_RUNNING)
 
 func stop() -> void:
+	_log_shutdown_trace("stop() begin", {
+		"bridge_present": _bridge != null,
+		"state": _state,
+	})
 	_state = CameraTracking.STATE_STOPPING
 	_detail = _make_state_detail()
 	emit_signal("state_changed", _state, _detail.duplicate(true))
@@ -66,6 +71,11 @@ func stop() -> void:
 			"runtime_available": false
 		})
 	}
+	_log_shutdown_trace("bridge.shutdown() returned", {
+		"ok": bool(snapshot.get("ok", false)),
+		"health_status": str(snapshot.get("health", {}).get("status", "")),
+		"process_active": bool(snapshot.get("health", {}).get("process_active", false)),
+	})
 	_runtime_health = MediaPipePythonRuntimeHealth.make(snapshot.get("health", {}))
 	_tracking_frame = MediaPipePythonFrameMapper.empty(_active_config)
 	_preview_descriptor = _make_preview_descriptor({})
@@ -75,6 +85,10 @@ func stop() -> void:
 	_detail = CameraTrackingConfig.make_state_detail()
 	emit_signal("preview_changed", _preview_descriptor.duplicate(true))
 	emit_signal("state_changed", _state, _detail.duplicate(true))
+	_log_shutdown_trace("stop() end", {
+		"state": _state,
+		"health_status": str(_runtime_health.get("status", "")),
+	})
 
 func change(config: Dictionary) -> void:
 	_active_config = CameraTrackingConfig.normalize(config)
@@ -204,6 +218,9 @@ func _fail_with(error_info: Dictionary) -> void:
 	_detail = _make_state_detail()
 	emit_signal("state_changed", _state, _detail.duplicate(true))
 	emit_signal("error_raised", error_info.duplicate(true))
+
+func _log_shutdown_trace(marker: String, detail: Dictionary = {}) -> void:
+	print("%s %s %s" % [_SHUTDOWN_TRACE_PREFIX, marker, JSON.stringify(detail)])
 
 func _make_preview_descriptor(overrides: Dictionary) -> Dictionary:
 	var descriptor := CameraTrackingPreview.detached(_active_config)
