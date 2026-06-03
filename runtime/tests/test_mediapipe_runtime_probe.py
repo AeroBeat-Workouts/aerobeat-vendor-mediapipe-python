@@ -420,8 +420,9 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             ("/dev/video0", "default"): {"opened": True, "width": 1920, "height": 1080, "fps": 5.0, "fourcc": "YUYV"},
         }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
-            with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
-                result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+            with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 30.0}):
+                with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
+                    result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
         self.assertTrue(result["ok"])
         capture_mode = result["health"]["capture_mode"]
         self.assertEqual(capture_mode["backend"], "CAP_V4L2")
@@ -458,8 +459,9 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             ("/dev/video0", "default"): {"opened": True, "width": 1280, "height": 720, "fps": 30.0, "fourcc": "MJPG"},
         }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
-            with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
-                result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+            with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 30.0}):
+                with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
+                    result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
         self.assertTrue(result["ok"])
         capture_mode = result["health"]["capture_mode"]
         self.assertEqual(capture_mode["backend"], "default")
@@ -652,8 +654,9 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
             with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError()):
-                with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2}, clear=False):
-                    result = probe._success_response(request)
+                with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 15.0}):
+                    with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2}, clear=False):
+                        result = probe._success_response(request)
         self.assertTrue(result["ok"])
         self.assertEqual(result["camera_options"]["reported_source"], "fallback_probe_sweep")
         self.assertEqual(result["camera_options"]["probe_strategy"], "bounded_probe_sweep")
@@ -665,11 +668,60 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertEqual(result["camera_options"]["selected"]["fourcc"], "MJPG")
         self.assertEqual(result["camera_options"]["actual"]["width"], 960)
         self.assertEqual(result["camera_options"]["actual"]["height"], 540)
-        self.assertEqual(result["camera_options"]["actual"]["fps"], 30.0)
+        self.assertEqual(result["camera_options"]["actual"]["fps"], 15.0)
+        self.assertEqual(result["camera_options"]["actual"]["reported_fps"], 30.0)
+        self.assertEqual(result["camera_options"]["actual"]["observed_fps"], 15.0)
         self.assertEqual(result["camera_options"]["actual"]["fourcc"], "MJPG")
         self.assertEqual(result["health"]["capture_mode"]["selected"]["width"], 960)
-        self.assertEqual(result["health"]["capture_mode"]["actual"]["fps"], 30.0)
+        self.assertEqual(result["health"]["capture_mode"]["actual"]["fps"], 15.0)
         self.assertGreater(len(result["camera_options"]["notes"]), 0)
+        self.assertTrue(any("runtime observed ~15.000 FPS after OpenCV reported 30.000 FPS" in note for note in result["health"]["notes"]))
+
+    def test_fallback_capture_session_prefers_higher_observed_runtime_fps_path(self):
+        runtime = {
+            "working_directory": os.getcwd(),
+            "live_camera_width": 960,
+            "live_camera_height": 540,
+            "live_camera_fps": 30,
+            "live_camera_fourcc": "MJPG",
+            "environment": {
+                "AEROBEAT_CAMERA_ROOT": "/dev",
+                "AEROBEAT_CAMERA_PATTERN": "video0",
+            },
+        }
+        _FakeNegotiationCv2.PROFILES = {
+            ("/dev/video0", "CAP_V4L2"): {"opened": True, "width": 960, "height": 540, "fps": 30.0, "fourcc": "MJPG"},
+            (0, "CAP_V4L2"): {"opened": True, "width": 960, "height": 540, "fps": 30.0, "fourcc": "MJPG"},
+        }
+
+        def _fake_runtime_burst(_camera_id, capture, source_label, sample_count=8):
+            del sample_count
+            observed = 22.5 if str(source_label).endswith("device index fallback 0") else 15.0
+            width = int(capture.profile.get("width", 0))
+            height = int(capture.profile.get("height", 0))
+            return {
+                "ok": True,
+                "observed_fps": observed,
+                "frame_bgr": types.SimpleNamespace(shape=(height, width, 3)),
+                "width": width,
+                "height": height,
+                "sampled_frames": 8,
+            }
+
+        with mock.patch.object(probe.platform, "system", return_value="Linux"):
+            with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError()):
+                with mock.patch.object(probe, "_measure_live_camera_runtime_burst", side_effect=_fake_runtime_burst):
+                    with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2}, clear=False):
+                        capture_session = probe._open_live_camera_capture_session("/dev/video0", runtime)
+        self.assertTrue(capture_session["ok"])
+        self.assertEqual(capture_session["source_label"], "CAP_V4L2/device index fallback 0")
+        self.assertEqual(capture_session["capture_negotiation"]["selected"]["source_label"], "device index fallback 0")
+        self.assertEqual(capture_session["capture_negotiation"]["selected"]["capture_source"], 0)
+        self.assertEqual(capture_session["capture_negotiation"]["actual"]["fps"], 22.5)
+        self.assertEqual(capture_session["capture_negotiation"]["actual"]["reported_fps"], 30.0)
+        self.assertEqual(capture_session["capture_negotiation"]["actual"]["source_label"], "device index fallback 0")
+        self.assertTrue(any("runtime observed ~22.500 FPS after OpenCV reported 30.000 FPS" in note for note in capture_session["notes"]))
+        probe._close_live_camera_capture_session(capture_session)
 
 
 if __name__ == "__main__":
