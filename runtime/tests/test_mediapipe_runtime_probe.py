@@ -646,13 +646,29 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             },
             "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
         }
+        _FakeNegotiationCv2.PROFILES = {
+            ("/dev/video0", "CAP_V4L2"): {"opened": True, "width": 960, "height": 540, "fps": 30.0, "fourcc": "MJPG"},
+            ("/dev/video0", "default"): {"opened": True, "width": 640, "height": 480, "fps": 15.0, "fourcc": "YUYV"},
+        }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
             with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError()):
-                result = probe._success_response(request)
+                with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2}, clear=False):
+                    result = probe._success_response(request)
         self.assertTrue(result["ok"])
         self.assertEqual(result["camera_options"]["reported_source"], "fallback_probe_sweep")
         self.assertEqual(result["camera_options"]["probe_strategy"], "bounded_probe_sweep")
         self.assertEqual(result["camera_options"]["reported_options"], [])
+        self.assertGreater(len(result["camera_options"]["probed_options"]), 0)
+        self.assertEqual(result["camera_options"]["selected"]["width"], 960)
+        self.assertEqual(result["camera_options"]["selected"]["height"], 540)
+        self.assertEqual(result["camera_options"]["selected"]["fps"], 30.0)
+        self.assertEqual(result["camera_options"]["selected"]["fourcc"], "MJPG")
+        self.assertEqual(result["camera_options"]["actual"]["width"], 960)
+        self.assertEqual(result["camera_options"]["actual"]["height"], 540)
+        self.assertEqual(result["camera_options"]["actual"]["fps"], 30.0)
+        self.assertEqual(result["camera_options"]["actual"]["fourcc"], "MJPG")
+        self.assertEqual(result["health"]["capture_mode"]["selected"]["width"], 960)
+        self.assertEqual(result["health"]["capture_mode"]["actual"]["fps"], 30.0)
         self.assertGreater(len(result["camera_options"]["notes"]), 0)
 
 

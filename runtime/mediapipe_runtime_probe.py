@@ -2106,35 +2106,58 @@ def _describe_live_camera_options(request: Dict[str, Any]) -> Dict[str, Any]:
 
     runtime: Dict[str, Any] = selection["runtime"]
     selected_camera_id = str(selection["selected_camera_id"])
+    capture_session = _select_live_camera_capture_session(selected_camera_id, runtime, "describe camera options")
+    if not bool(capture_session.get("ok", False)):
+        error_info = capture_session.get("error_info", {
+            "code": "camera_open_failed",
+            "message": f"Failed to probe camera options for selected camera '{selected_camera_id}'",
+        })
+        health = selection["health"].copy()
+        health.update({
+            "status": "error",
+            "healthy": False,
+            "camera_accessible": False,
+            "last_error": error_info,
+            "notes": list(health.get("notes", [])) + [error_info.get("message", "Camera options probe failed")],
+        })
+        return {
+            "ok": False,
+            "cameras": selection.get("cameras", []),
+            "selected_camera_id": selected_camera_id,
+            "health": health,
+            "preview_descriptor": {},
+            "raw_tracking_frame": {},
+            "error_info": error_info,
+        }
+
     try:
-        import cv2  # type: ignore
-        preferred_backend_name = _preferred_live_camera_backend_name(cv2, selected_camera_id)
-    except Exception:
-        preferred_backend_name = "CAP_V4L2" if _is_linux_video_device(selected_camera_id) else "default"
-    mode_summary = _live_camera_reported_mode_summary(selected_camera_id, runtime, preferred_backend_name)
-    camera_options = _camera_options_payload(mode_summary, [], selected={}, actual={})
-    health = selection["health"].copy()
-    health["status"] = "idle"
-    health["healthy"] = True
-    health["notes"] = list(health.get("notes", [])) + list(camera_options.get("notes", []))
-    health["capture_mode"] = {
-        "requested": camera_options.get("requested", {}),
-        "reported_source": camera_options.get("reported_source", "fallback_probe_sweep"),
-        "selection_policy": camera_options.get("selection_policy", "framerate_first_resolution_second_format_backend"),
-        "reported_options": camera_options.get("reported_options", []),
-        "probed_options": [],
-        "selected": {},
-        "actual": {},
-    }
-    return {
-        "ok": True,
-        "cameras": selection.get("cameras", []),
-        "selected_camera_id": selected_camera_id,
-        "health": health,
-        "preview_descriptor": {},
-        "raw_tracking_frame": {},
-        "camera_options": camera_options,
-    }
+        camera_options = capture_session.get("camera_options", {}).copy() if isinstance(capture_session.get("camera_options", {}), dict) else {}
+        capture_negotiation = capture_session.get("capture_negotiation", {}).copy() if isinstance(capture_session.get("capture_negotiation", {}), dict) else {}
+        health = selection["health"].copy()
+        health["status"] = "idle"
+        health["healthy"] = True
+        health["camera_accessible"] = True
+        health["notes"] = list(health.get("notes", [])) + list(capture_session.get("notes", []))
+        health["capture_mode"] = {
+            "requested": camera_options.get("requested", {}),
+            "reported_source": camera_options.get("reported_source", capture_negotiation.get("reported_source", "fallback_probe_sweep")),
+            "selection_policy": camera_options.get("selection_policy", capture_negotiation.get("selection_policy", "framerate_first_resolution_second_format_backend")),
+            "reported_options": camera_options.get("reported_options", []),
+            "probed_options": camera_options.get("probed_options", []),
+            "selected": camera_options.get("selected", capture_negotiation.get("selected", {})),
+            "actual": camera_options.get("actual", capture_negotiation.get("actual", {})),
+        }
+        return {
+            "ok": True,
+            "cameras": selection.get("cameras", []),
+            "selected_camera_id": selected_camera_id,
+            "health": health,
+            "preview_descriptor": {},
+            "raw_tracking_frame": {},
+            "camera_options": camera_options,
+        }
+    finally:
+        _close_live_camera_capture_session(capture_session)
 
 
 def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timestamp: bool = False) -> Dict[str, Any]:
