@@ -8,7 +8,6 @@ const _TIMEOUT_EXIT_CODE := 124
 const _DEFAULT_RUNTIME_ENTRYPOINT := "runtime/mediapipe_runtime_probe.py"
 const _SESSION_SNAPSHOT_FILENAME := "runtime_snapshot.json"
 const _SESSION_STOP_FILENAME := "stop"
-const _SHUTDOWN_TRACE_PREFIX := "[CameraShutdownTrace][MediaPipePythonRuntimeBridge]"
 
 var _last_vendor_config: Dictionary = {}
 var _last_health: Dictionary = MediaPipePythonRuntimeHealth.unavailable()
@@ -29,10 +28,6 @@ func startup(vendor_config: Dictionary) -> Dictionary:
 	return _start_runtime_session("startup", prepared.get("config", {}))
 
 func shutdown() -> Dictionary:
-	_log_shutdown_trace("shutdown begin", {
-		"session_dir": _session_dir,
-		"session_pid": _session_pid,
-	})
 	if _session_dir == "" or _session_pid <= 0:
 		var notes: Array = ["MediaPipe Python runtime bridge is idle; no active continuous runtime session exists."]
 		if _last_selected_camera_id != "":
@@ -50,9 +45,6 @@ func shutdown() -> Dictionary:
 		_last_playback_status = {}
 		_last_raw_tracking_frame = {}
 		_last_camera_options = {}
-		_log_shutdown_trace("shutdown idle", {
-			"selected_camera_id": _last_selected_camera_id,
-		})
 		return {
 			"ok": true,
 			"health": _last_health.duplicate(true),
@@ -68,9 +60,6 @@ func shutdown() -> Dictionary:
 	if stop_file != null:
 		stop_file.store_string("stop")
 		stop_file.close()
-	_log_shutdown_trace("shutdown stop file written", {
-		"stop_path": stop_path,
-	})
 
 	var timeout_ms := int(_last_vendor_config.get("runtime", {}).get("shutdown_timeout_ms", MediaPipePythonConfig.DEFAULT_SHUTDOWN_TIMEOUT_MS))
 	var started_ms := Time.get_ticks_msec()
@@ -78,15 +67,8 @@ func shutdown() -> Dictionary:
 		if OS.is_process_running(_session_pid) == false:
 			break
 		OS.delay_msec(50)
-	_log_shutdown_trace("shutdown wait finished", {
-		"timeout_ms": timeout_ms,
-		"process_running": OS.is_process_running(_session_pid),
-	})
 
 	if OS.is_process_running(_session_pid):
-		_log_shutdown_trace("shutdown escalating SIGTERM", {
-			"session_pid": _session_pid,
-		})
 		OS.execute("/bin/kill", PackedStringArray(["-TERM", str(_session_pid)]), [], true)
 		var grace_started_ms := Time.get_ticks_msec()
 		while Time.get_ticks_msec() - grace_started_ms < 1500:
@@ -94,16 +76,9 @@ func shutdown() -> Dictionary:
 				break
 			OS.delay_msec(50)
 		if OS.is_process_running(_session_pid):
-			_log_shutdown_trace("shutdown escalating SIGKILL", {
-				"session_pid": _session_pid,
-			})
 			OS.execute("/bin/kill", PackedStringArray(["-KILL", str(_session_pid)]), [], true)
 
 	var snapshot := _read_session_snapshot(_session_dir)
-	_log_shutdown_trace("shutdown snapshot read", {
-		"snapshot_ok": bool(snapshot.get("ok", false)),
-		"health_status": str(snapshot.get("health", {}).get("status", "")),
-	})
 	_cleanup_session_files()
 	_last_preview_descriptor = {}
 	_last_playback_status = {}
@@ -125,10 +100,6 @@ func shutdown() -> Dictionary:
 		health_from_snapshot["status"] = MediaPipePythonRuntimeHealth.STATUS_IDLE
 		_last_health = health_from_snapshot
 		_last_cameras = MediaPipePythonCameraInventory.normalize(snapshot.get("cameras", []))
-	_log_shutdown_trace("shutdown end", {
-		"health_status": str(_last_health.get("status", "")),
-		"camera_count": _last_cameras.size(),
-	})
 	return {
 		"ok": true,
 		"health": _last_health.duplicate(true),
@@ -287,12 +258,6 @@ func _start_runtime_session(operation: String, vendor_config: Dictionary) -> Dic
 				return _remember_failure(snapshot.get("error_info", {}), _last_health, snapshot.get("cameras", []))
 			_last_health["process_active"] = OS.is_process_running(_session_pid)
 			_last_health["tracking_active"] = _last_health["process_active"]
-			_log_shutdown_trace("runtime session ready", {
-				"operation": operation,
-				"session_dir": _session_dir,
-				"session_pid": _session_pid,
-				"health_status": str(_last_health.get("status", "")),
-			})
 			return {
 				"ok": true,
 				"health": _last_health.duplicate(true),
@@ -595,9 +560,6 @@ func _cleanup_session_files() -> void:
 		DirAccess.remove_absolute(_session_dir)
 	_session_dir = ""
 	_session_pid = -1
-
-func _log_shutdown_trace(marker: String, detail: Dictionary = {}) -> void:
-	print("%s %s %s" % [_SHUTDOWN_TRACE_PREFIX, marker, JSON.stringify(detail)])
 
 func _format_timeout_seconds(timeout_ms: int) -> String:
 	var seconds := maxf(0.001, float(timeout_ms) / 1000.0)
