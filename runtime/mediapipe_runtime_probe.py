@@ -18,6 +18,10 @@ _MODEL_FILENAMES = {
     1: "pose_landmarker_full.task",
     2: "pose_landmarker_heavy.task",
 }
+_HAND_LANDMARKER_MODEL_FILENAMES = ("hand_landmarker.task", "hand_landmarker.task")
+_HAND_LANDMARK_MODE_DEFAULT = "lite"
+_LITE_HAND_LANDMARK_IDS = (0, 1, 5, 9, 13, 17, 4, 8, 12, 16, 20)
+_FULL_HAND_LANDMARK_IDS = tuple(range(21))
 
 _SESSION_SNAPSHOT_FILENAME = "runtime_snapshot.json"
 _SESSION_PREVIEW_FRAME_FILENAME = "preview_frame.jpg"
@@ -449,6 +453,153 @@ def _normalize_fixture_landmark(camera_id: str, landmark: Any, index: int) -> Di
     }
 
 
+def _normalize_hand_landmark_mode(tracking: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None) -> str:
+    runtime = runtime or {}
+    hands = tracking.get("hands", {}) if isinstance(tracking.get("hands", {}), dict) else {}
+    candidate = str(runtime.get("hand_landmark_mode", hands.get("landmark_mode", _HAND_LANDMARK_MODE_DEFAULT))).strip().lower()
+    return "full" if candidate == "full" else _HAND_LANDMARK_MODE_DEFAULT
+
+
+def _hand_tracking_request(tracking: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    runtime = runtime or {}
+    hands = tracking.get("hands", {}) if isinstance(tracking.get("hands", {}), dict) else {}
+    validity = hands.get("validity", {}) if isinstance(hands.get("validity", {}), dict) else {}
+    bbox = hands.get("bbox", {}) if isinstance(hands.get("bbox", {}), dict) else {}
+    return {
+        "enabled": bool(runtime.get("hand_tracking_enabled", hands.get("enabled", False))),
+        "landmark_mode": _normalize_hand_landmark_mode(tracking, runtime),
+        "bbox_enabled": bool(runtime.get("hand_bbox_enabled", bbox.get("enabled", True))),
+        "inference_interval_frames": max(1, int(runtime.get("hand_inference_interval_frames", hands.get("inference_interval_frames", 1)) or 1)),
+        "bbox_recompute_interval_frames": max(1, int(runtime.get("hand_bbox_recompute_interval_frames", hands.get("bbox_recompute_interval_frames", 1)) or 1)),
+        "max_stale_frames": max(0, int(runtime.get("hand_max_stale_frames", validity.get("max_stale_frames", 2)) or 0)),
+        "reacquire_stable_frames": max(1, int(runtime.get("hand_reacquire_stable_frames", validity.get("reacquire_stable_frames", 2)) or 1)),
+    }
+
+
+def _hand_tracking_constraints(request: Dict[str, Any], backend: str, hand_available: bool = True) -> List[str]:
+    mode = str(request.get("landmark_mode", _HAND_LANDMARK_MODE_DEFAULT))
+    constraints = [
+        f"Hand landmark mode '{mode}' derives bbox geometry from the same emitted landmark subset, so lite mode intentionally under-bounds compared with full mode.",
+        "MediaPipe does not expose stable per-hand track IDs in this slice; higher layers must not assume handedness labels remain bound across frames.",
+        "Preview mirroring is a presentation transform only; raw hand coordinates stay camera-native and must be mirrored consistently upstream alongside pose.",
+        f"This vendor slice surfaces requested hand cadence only (inference every {int(request.get('inference_interval_frames', 1))} frame(s), bbox recompute every {int(request.get('bbox_recompute_interval_frames', 1))} frame(s)); actual stale/reacquire semantics remain an upstream responsibility.",
+    ]
+    if backend == "mediapipe_tasks_hand_landmarker":
+        constraints.append("MediaPipe tasks hand inference runs in IMAGE mode here, so each frame is an independent detection with no vendor-side interpolation or per-hand timestamps.")
+    elif backend == "mediapipe_solutions_hands":
+        constraints.append("MediaPipe legacy Hands exposes landmarks and handedness per frame but still does not provide durable hand IDs or vendor-side stale counters.")
+    elif not hand_available:
+        constraints.append("Hand inference was requested but the installed MediaPipe package/model assets could not provide it on this host; upstream should treat hand lanes as unavailable, not stale.")
+    return constraints
+
+
+def _selected_hand_landmark_ids(mode: str) -> Sequence[int]:
+    return _FULL_HAND_LANDMARK_IDS if mode == "full" else _LITE_HAND_LANDMARK_IDS
+
+
+def _normalize_handedness_label(label: Any) -> str:
+    normalized = str(label).strip().lower()
+    if normalized in ("left", "right"):
+        return normalized
+    return "unknown"
+
+
+def _handedness_from_legacy_results(results: Any, index: int) -> Dict[str, Any]:
+    multi_handedness = getattr(results, "multi_handedness", None)
+    if not isinstance(multi_handedness, list) or index >= len(multi_handedness):
+        return {"label": "unknown", "score": 0.0}
+    candidate = multi_handedness[index]
+    classifications = getattr(candidate, "classification", None)
+    if isinstance(classifications, list) and classifications:
+        top = classifications[0]
+        return {
+            "label": _normalize_handedness_label(getattr(top, "label", getattr(top, "category_name", "unknown"))),
+            "score": float(getattr(top, "score", 0.0)),
+        }
+    return {"label": "unknown", "score": 0.0}
+
+
+def _handedness_from_tasks_result(result: Any, index: int) -> Dict[str, Any]:
+    handedness = getattr(result, "handedness", None)
+    if not isinstance(handedness, list) or index >= len(handedness):
+        return {"label": "unknown", "score": 0.0}
+    candidate = handedness[index]
+    if isinstance(candidate, list) and candidate:
+        top = candidate[0]
+    else:
+        top = candidate
+    return {
+        "label": _normalize_handedness_label(getattr(top, "category_name", getattr(top, "display_name", getattr(top, "label", "unknown")))),
+        "score": float(getattr(top, "score", 0.0)),
+    }
+
+
+def _hand_landmarks_from_source(landmarks_source: Any) -> List[Dict[str, float]]:
+    landmarks: List[Dict[str, float]] = []
+    if landmarks_source is None:
+        return landmarks
+    for landmark in landmarks_source:
+        landmarks.append({
+            "id": len(landmarks),
+            "x": float(getattr(landmark, "x", 0.0)),
+            "y": float(getattr(landmark, "y", 0.0)),
+            "z": float(getattr(landmark, "z", 0.0)),
+            "visibility": float(getattr(landmark, "visibility", 1.0)),
+        })
+    return landmarks
+
+
+def _normalize_hand_detection(hand: Dict[str, Any], mode: str, bbox_enabled: bool) -> Dict[str, Any]:
+    full_landmarks = [dict(landmark) for landmark in hand.get("landmarks", []) if isinstance(landmark, dict)]
+    selected_ids = set(_selected_hand_landmark_ids(mode))
+    landmarks = [landmark for landmark in full_landmarks if int(landmark.get("id", -1)) in selected_ids]
+    normalized = {
+        "index": int(hand.get("index", 0)),
+        "label": _normalize_handedness_label(hand.get("label", "unknown")),
+        "score": float(hand.get("score", 0.0)),
+        "landmark_mode": mode,
+        "landmark_count_before": len(full_landmarks),
+        "landmark_count_after": len(landmarks),
+        "landmarks": landmarks,
+    }
+    if bbox_enabled and landmarks:
+        xs = [max(0.0, min(1.0, float(landmark.get("x", 0.0)))) for landmark in landmarks]
+        ys = [max(0.0, min(1.0, float(landmark.get("y", 0.0)))) for landmark in landmarks]
+        min_x = min(xs)
+        max_x = max(xs)
+        min_y = min(ys)
+        max_y = max(ys)
+        width = max(0.0, max_x - min_x)
+        height = max(0.0, max_y - min_y)
+        normalized["bbox"] = {
+            "x": min_x,
+            "y": min_y,
+            "width": width,
+            "height": height,
+            "area": width * height,
+            "landmark_mode": mode,
+            "landmark_count": len(landmarks),
+            "landmark_ids": [int(landmark.get("id", -1)) for landmark in landmarks],
+            "coordinate_space": "normalized_frame",
+            "area_unit": "normalized_frame_area",
+        }
+    return normalized
+
+
+def _normalize_fixture_hand(camera_id: str, hand: Any, index: int) -> Dict[str, Any]:
+    if not isinstance(hand, dict):
+        raise ValueError(f"Camera sample fixture for '{camera_id}' hand {index} must be an object")
+    landmarks_raw = hand.get("landmarks", [])
+    if not isinstance(landmarks_raw, list):
+        raise ValueError(f"Camera sample fixture for '{camera_id}' hand {index} landmarks must be an array")
+    return {
+        "index": int(hand.get("index", index)),
+        "label": _normalize_handedness_label(hand.get("label", "unknown")),
+        "score": float(hand.get("score", 0.0)),
+        "landmarks": [_normalize_fixture_landmark(camera_id, landmark, landmark_index) for landmark_index, landmark in enumerate(landmarks_raw)],
+    }
+
+
 def _raw_tracking_frame_base(source_kind: str, source_id: str, width: int, height: int, timestamp_ms: int) -> Dict[str, Any]:
     return {
         "timestamp_ms": timestamp_ms,
@@ -497,6 +648,15 @@ def _normalize_fixture_sample(source_id: str, fixture: Dict[str, Any], sample_in
             notes.append(f"Fixture supplied {len(landmarks)} pose landmark(s) for '{source_id}'.")
         else:
             notes.append(f"Fixture supplied an empty landmark array for '{source_id}'; tracking remains idle.")
+
+    hands_raw = fixture.get("hands")
+    if isinstance(hands_raw, list):
+        hands = [_normalize_fixture_hand(source_id, hand, index) for index, hand in enumerate(hands_raw)]
+        if hands:
+            raw_tracking_frame["hands"] = hands
+            notes.append(f"Fixture supplied {len(hands)} raw hand sample(s) for '{source_id}'.")
+        else:
+            notes.append(f"Fixture supplied an empty hand array for '{source_id}'.")
 
     return {
         "raw_tracking_frame": raw_tracking_frame,
@@ -1409,6 +1569,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     source = request.get("source", {}) if isinstance(request.get("source", {}), dict) else {}
     preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
     preview_config = _preview_runtime_config(preview, runtime)
+    tracking = request.get("tracking", {}) if isinstance(request.get("tracking", {}), dict) else {}
     tracking_semantics = _tracking_semantics(request)
     tracking_filter_state: Optional[Dict[str, Any]] = {} if bool(tracking_semantics.get('filter_enabled', True)) else None
     video_path = str(source.get("path", "")).strip()
@@ -1465,7 +1626,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
 
     inference_session: Optional[Dict[str, Any]] = None
     if not use_fixture_sequence:
-        inference_session = _create_inference_session(runtime)
+        inference_session = _create_inference_session(runtime, tracking)
         if not bool(inference_session.get("ok", False)):
             snapshot = _continuous_error_snapshot(request, {
                 "error_info": inference_session.get("error_info", {
@@ -1582,7 +1743,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 _write_session_snapshot(session_dir, snapshot)
                 return 1
 
-            inferred = _infer_pose_landmarks(sampled, runtime, inference_session=inference_session, tracking_semantics=tracking_semantics, filter_state=tracking_filter_state)
+            inferred = _infer_pose_landmarks(sampled, runtime, tracking=tracking, inference_session=inference_session, tracking_semantics=tracking_semantics, filter_state=tracking_filter_state)
             if not bool(inferred.get("ok", False)):
                 snapshot = _continuous_error_snapshot(request, {
                     "error_info": inferred.get("error_info", {
@@ -1744,6 +1905,36 @@ def _resolve_pose_landmarker_model_path(runtime: Dict[str, Any]) -> str:
     return ""
 
 
+def _default_hand_landmarker_model_paths(_runtime: Dict[str, Any]) -> Sequence[str]:
+    return (
+        f"models/{_HAND_LANDMARKER_MODEL_FILENAMES[0]}",
+        f"runtime/models/{_HAND_LANDMARKER_MODEL_FILENAMES[1]}",
+    )
+
+
+def _resolve_hand_landmarker_model_path(runtime: Dict[str, Any]) -> str:
+    environment = _runtime_env(runtime)
+    candidate_values = [
+        str(runtime.get("hand_landmarker_model_path", "")).strip(),
+        str(environment.get("AEROBEAT_MEDIAPIPE_HAND_LANDMARKER_MODEL_PATH", "")).strip(),
+        str(environment.get("MEDIAPIPE_HAND_LANDMARKER_MODEL_PATH", os.environ.get("MEDIAPIPE_HAND_LANDMARKER_MODEL_PATH", ""))).strip(),
+    ]
+
+    for candidate in candidate_values:
+        if candidate == "":
+            continue
+        resolved = _resolve_runtime_path(runtime, candidate)
+        if os.path.isfile(resolved):
+            return resolved
+
+    for candidate in _default_hand_landmarker_model_paths(runtime):
+        resolved = _resolve_runtime_path(runtime, candidate)
+        if os.path.isfile(resolved):
+            return resolved
+
+    return ""
+
+
 def _open_live_camera_capture_session(camera_id: str, runtime: Dict[str, Any]) -> Dict[str, Any]:
     fixture_sample = _sample_from_fixture(camera_id, runtime, sample_index=0, dynamic_timestamp=False, source_kind="live_camera")
     if fixture_sample is not None:
@@ -1810,7 +2001,74 @@ def _capture_live_camera_session_sample(camera_id: str, runtime: Dict[str, Any],
     }
 
 
-def _create_inference_session(runtime: Dict[str, Any]) -> Dict[str, Any]:
+def _create_legacy_hand_inference_session(mp: Any, hand_request: Dict[str, Any]) -> Dict[str, Any]:
+    if not bool(hand_request.get("enabled", False)):
+        return {"enabled": False}
+    if not hasattr(mp, "solutions") or not hasattr(mp.solutions, "hands"):
+        return {
+            "enabled": True,
+            "error_info": {
+                "code": "mediapipe_package_unsupported",
+                "message": "Installed MediaPipe package does not expose mediapipe.solutions.hands for legacy hand inference",
+            },
+        }
+    try:
+        hands = mp.solutions.hands.Hands(static_image_mode=False, max_num_hands=2)
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "error_info": {
+                "code": "mediapipe_inference_failed",
+                "message": f"MediaPipe legacy hands session could not be created: {exc}",
+            },
+        }
+    return {
+        "enabled": True,
+        "backend": "mediapipe_solutions_hands",
+        "processor": hands,
+    }
+
+
+def _create_tasks_hand_inference_session(mp: Any, runtime: Dict[str, Any], hand_request: Dict[str, Any]) -> Dict[str, Any]:
+    if not bool(hand_request.get("enabled", False)):
+        return {"enabled": False}
+    model_path = _resolve_hand_landmarker_model_path(runtime)
+    if model_path == "":
+        return {
+            "enabled": True,
+            "error_info": {
+                "code": "mediapipe_model_missing",
+                "message": "MediaPipe tasks hand inference requires a hand landmarker .task model asset, but none was found. Checked runtime.hand_landmarker_model_path, AEROBEAT_MEDIAPIPE_HAND_LANDMARKER_MODEL_PATH, MEDIAPIPE_HAND_LANDMARKER_MODEL_PATH, and repo default hand_landmarker.task locations.",
+            },
+        }
+    try:
+        from mediapipe.tasks.python import vision  # type: ignore
+        from mediapipe.tasks.python.core.base_options import BaseOptions  # type: ignore
+        options = vision.HandLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=model_path),
+            running_mode=vision.RunningMode.IMAGE,
+            num_hands=2,
+        )
+        hand_landmarker = vision.HandLandmarker.create_from_options(options)
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "error_info": {
+                "code": "mediapipe_package_unsupported",
+                "message": f"Installed MediaPipe package exposes mediapipe.tasks but could not create a reusable HandLandmarker on this host: {exc}",
+            },
+        }
+    return {
+        "enabled": True,
+        "backend": "mediapipe_tasks_hand_landmarker",
+        "processor": hand_landmarker,
+        "model_asset_path": model_path,
+    }
+
+
+def _create_inference_session(runtime: Dict[str, Any], tracking: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    tracking = tracking or {}
+    hand_request = _hand_tracking_request(tracking, runtime)
     try:
         import cv2  # type: ignore
     except Exception as exc:
@@ -1847,12 +2105,23 @@ def _create_inference_session(runtime: Dict[str, Any]) -> Dict[str, Any]:
                     "message": f"MediaPipe legacy pose session could not be created: {exc}",
                 },
             }
-        return {
+        hand_session = _create_legacy_hand_inference_session(mp, hand_request)
+        session = {
             "ok": True,
             "backend": "mediapipe_solutions_pose",
             "cv2": cv2,
             "processor": pose,
+            "pose_processor": pose,
+            "hand_request": hand_request,
         }
+        if hand_session.get("backend"):
+            session["hand_backend"] = hand_session.get("backend")
+            session["hand_processor"] = hand_session.get("processor")
+        if hand_session.get("model_asset_path"):
+            session["hand_model_asset_path"] = hand_session.get("model_asset_path")
+        if hand_session.get("error_info"):
+            session["hand_error_info"] = hand_session.get("error_info")
+        return session
 
     if has_tasks_api:
         model_path = _resolve_pose_landmarker_model_path(runtime)
@@ -1881,14 +2150,25 @@ def _create_inference_session(runtime: Dict[str, Any]) -> Dict[str, Any]:
                     "message": f"Installed MediaPipe package exposes mediapipe.tasks but could not create a reusable PoseLandmarker on this host: {exc}",
                 },
             }
-        return {
+        hand_session = _create_tasks_hand_inference_session(mp, runtime, hand_request)
+        session = {
             "ok": True,
             "backend": "mediapipe_tasks_pose_landmarker",
             "cv2": cv2,
             "mp": mp,
             "processor": landmarker,
+            "pose_processor": landmarker,
             "model_asset_path": model_path,
+            "hand_request": hand_request,
         }
+        if hand_session.get("backend"):
+            session["hand_backend"] = hand_session.get("backend")
+            session["hand_processor"] = hand_session.get("processor")
+        if hand_session.get("model_asset_path"):
+            session["hand_model_asset_path"] = hand_session.get("model_asset_path")
+        if hand_session.get("error_info"):
+            session["hand_error_info"] = hand_session.get("error_info")
+        return session
 
     return {
         "ok": False,
@@ -1900,13 +2180,18 @@ def _create_inference_session(runtime: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _close_inference_session(inference_session: Dict[str, Any]) -> None:
-    processor = inference_session.get("processor")
-    close = getattr(processor, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            pass
+    processors: List[Any] = []
+    for key in ("processor", "pose_processor", "hand_processor"):
+        processor = inference_session.get(key)
+        if processor is not None and processor not in processors:
+            processors.append(processor)
+    for processor in processors:
+        close = getattr(processor, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
 
 def _infer_pose_landmarks_from_session(frame_bgr: Any, inference_session: Dict[str, Any]) -> Dict[str, Any]:
@@ -1932,7 +2217,7 @@ def _infer_pose_landmarks_from_session(frame_bgr: Any, inference_session: Dict[s
         }
 
     backend = str(inference_session.get("backend", ""))
-    processor = inference_session.get("processor")
+    processor = inference_session.get("pose_processor", inference_session.get("processor"))
     if backend == "mediapipe_solutions_pose":
         try:
             results = processor.process(frame_rgb)
@@ -1985,6 +2270,124 @@ def _infer_pose_landmarks_from_session(frame_bgr: Any, inference_session: Dict[s
             "message": f"Continuous inference session backend '{backend}' is unsupported",
         },
     }
+
+
+def _hands_from_legacy_results(results: Any) -> List[Dict[str, Any]]:
+    multi_hand_landmarks = getattr(results, "multi_hand_landmarks", None)
+    if not isinstance(multi_hand_landmarks, list):
+        return []
+    hands: List[Dict[str, Any]] = []
+    for index, hand_landmarks in enumerate(multi_hand_landmarks):
+        hands.append({
+            "index": index,
+            **_handedness_from_legacy_results(results, index),
+            "landmarks": _hand_landmarks_from_source(getattr(hand_landmarks, "landmark", None)),
+        })
+    return hands
+
+
+def _hands_from_tasks_result(result: Any) -> List[Dict[str, Any]]:
+    hand_landmarks = getattr(result, "hand_landmarks", None)
+    if not isinstance(hand_landmarks, list):
+        return []
+    hands: List[Dict[str, Any]] = []
+    for index, landmarks in enumerate(hand_landmarks):
+        hands.append({
+            "index": index,
+            **_handedness_from_tasks_result(result, index),
+            "landmarks": _hand_landmarks_from_source(landmarks),
+        })
+    return hands
+
+
+def _infer_hands_from_session(frame_rgb: Any, inference_session: Dict[str, Any]) -> Dict[str, Any]:
+    hand_request = inference_session.get("hand_request", {}) if isinstance(inference_session.get("hand_request", {}), dict) else {}
+    if not bool(hand_request.get("enabled", False)):
+        return {
+            "ok": True,
+            "hands": [],
+            "inference_backend": "disabled",
+            "available": False,
+            "constraints": _hand_tracking_constraints(hand_request, "disabled", hand_available=False),
+        }
+    if isinstance(inference_session.get("hand_error_info"), dict):
+        return {
+            "ok": True,
+            "hands": [],
+            "inference_backend": str(inference_session.get("hand_backend", "unavailable")),
+            "available": False,
+            "error_info": inference_session.get("hand_error_info"),
+            "constraints": _hand_tracking_constraints(hand_request, str(inference_session.get("hand_backend", "unavailable")), hand_available=False),
+        }
+
+    backend = str(inference_session.get("hand_backend", ""))
+    processor = inference_session.get("hand_processor")
+    if processor is None or backend == "":
+        return {
+            "ok": True,
+            "hands": [],
+            "inference_backend": "unavailable",
+            "available": False,
+            "constraints": _hand_tracking_constraints(hand_request, "unavailable", hand_available=False),
+        }
+
+    if backend == "mediapipe_solutions_hands":
+        try:
+            results = processor.process(frame_rgb)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe legacy hands inference failed for the sampled frame: {exc}",
+                },
+            }
+        return {
+            "ok": True,
+            "hands": _hands_from_legacy_results(results),
+            "inference_backend": backend,
+            "available": True,
+            "constraints": _hand_tracking_constraints(hand_request, backend),
+        }
+
+    if backend == "mediapipe_tasks_hand_landmarker":
+        mp = inference_session.get("mp")
+        if mp is None:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_package_unsupported",
+                    "message": "Continuous inference session is missing MediaPipe tasks bindings for hand inference",
+                },
+            }
+        try:
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            result = processor.detect(mp_image)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe tasks hand inference failed for the sampled frame: {exc}",
+                },
+            }
+        return {
+            "ok": True,
+            "hands": _hands_from_tasks_result(result),
+            "inference_backend": backend,
+            "available": True,
+            "constraints": _hand_tracking_constraints(hand_request, backend),
+            "model_asset_path": inference_session.get("hand_model_asset_path", ""),
+        }
+
+    return {
+        "ok": False,
+        "error_info": {
+            "code": "mediapipe_package_unsupported",
+            "message": f"Continuous hand inference session backend '{backend}' is unsupported",
+        },
+    }
+
 
 
 def _infer_pose_landmarks_legacy(mp: Any, frame_rgb: Any) -> Dict[str, Any]:
@@ -2044,6 +2447,100 @@ def _infer_pose_landmarks_tasks(mp: Any, runtime: Dict[str, Any], frame_rgb: Any
         "ok": True,
         "landmarks": _landmarks_from_tasks_result(result),
         "inference_backend": "mediapipe_tasks_pose_landmarker",
+        "model_asset_path": model_path,
+    }
+
+
+def _infer_hands_legacy(mp: Any, frame_rgb: Any, hand_request: Dict[str, Any]) -> Dict[str, Any]:
+    if not bool(hand_request.get("enabled", False)):
+        return {
+            "ok": True,
+            "hands": [],
+            "inference_backend": "disabled",
+            "available": False,
+            "constraints": _hand_tracking_constraints(hand_request, "disabled", hand_available=False),
+        }
+    if not hasattr(mp, "solutions") or not hasattr(mp.solutions, "hands"):
+        return {
+            "ok": True,
+            "hands": [],
+            "inference_backend": "unavailable",
+            "available": False,
+            "error_info": {
+                "code": "mediapipe_package_unsupported",
+                "message": "Installed MediaPipe package does not expose mediapipe.solutions.hands for legacy hand inference",
+            },
+            "constraints": _hand_tracking_constraints(hand_request, "unavailable", hand_available=False),
+        }
+
+    with mp.solutions.hands.Hands(static_image_mode=True, max_num_hands=2) as hands:
+        results = hands.process(frame_rgb)
+
+    return {
+        "ok": True,
+        "hands": _hands_from_legacy_results(results),
+        "inference_backend": "mediapipe_solutions_hands",
+        "available": True,
+        "constraints": _hand_tracking_constraints(hand_request, "mediapipe_solutions_hands"),
+    }
+
+
+def _infer_hands_tasks(mp: Any, runtime: Dict[str, Any], frame_rgb: Any, hand_request: Dict[str, Any]) -> Dict[str, Any]:
+    if not bool(hand_request.get("enabled", False)):
+        return {
+            "ok": True,
+            "hands": [],
+            "inference_backend": "disabled",
+            "available": False,
+            "constraints": _hand_tracking_constraints(hand_request, "disabled", hand_available=False),
+        }
+
+    model_path = _resolve_hand_landmarker_model_path(runtime)
+    if model_path == "":
+        return {
+            "ok": True,
+            "hands": [],
+            "inference_backend": "unavailable",
+            "available": False,
+            "error_info": {
+                "code": "mediapipe_model_missing",
+                "message": "MediaPipe tasks hand inference requires a hand landmarker .task model asset, but none was found. Checked runtime.hand_landmarker_model_path, AEROBEAT_MEDIAPIPE_HAND_LANDMARKER_MODEL_PATH, MEDIAPIPE_HAND_LANDMARKER_MODEL_PATH, and repo default hand_landmarker.task locations.",
+            },
+            "constraints": _hand_tracking_constraints(hand_request, "unavailable", hand_available=False),
+        }
+
+    try:
+        from mediapipe.tasks.python import vision  # type: ignore
+        from mediapipe.tasks.python.core.base_options import BaseOptions  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": True,
+            "hands": [],
+            "inference_backend": "unavailable",
+            "available": False,
+            "error_info": {
+                "code": "mediapipe_package_unsupported",
+                "message": f"Installed MediaPipe package exposes mediapipe.tasks but does not provide HandLandmarker imports usable on this host: {exc}",
+            },
+            "constraints": _hand_tracking_constraints(hand_request, "unavailable", hand_available=False),
+        }
+
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+    options = vision.HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        running_mode=vision.RunningMode.IMAGE,
+        num_hands=2,
+    )
+
+    with vision.HandLandmarker.create_from_options(options) as hand_landmarker:
+        result = hand_landmarker.detect(mp_image)
+
+    return {
+        "ok": True,
+        "hands": _hands_from_tasks_result(result),
+        "inference_backend": "mediapipe_tasks_hand_landmarker",
+        "available": True,
+        "constraints": _hand_tracking_constraints(hand_request, "mediapipe_tasks_hand_landmarker"),
         "model_asset_path": model_path,
     }
 
@@ -2118,7 +2615,134 @@ def _infer_pose_landmarks_with_mediapipe(runtime: Dict[str, Any], frame_bgr: Any
     }
 
 
-def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], inference_session: Optional[Dict[str, Any]] = None, tracking_semantics: Optional[Dict[str, Any]] = None, filter_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _infer_hands_with_mediapipe(runtime: Dict[str, Any], tracking: Dict[str, Any], frame_bgr: Any) -> Dict[str, Any]:
+    hand_request = _hand_tracking_request(tracking, runtime)
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "opencv_unavailable",
+                "message": f"OpenCV import failed while converting the sampled frame for hand inference: {exc}",
+            },
+        }
+
+    try:
+        import mediapipe as mp  # type: ignore
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_unavailable",
+                "message": f"MediaPipe import failed while inferring hands from the sampled frame: {exc}",
+            },
+        }
+
+    try:
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_inference_failed",
+                "message": f"OpenCV could not convert the sampled frame for MediaPipe hand inference: {exc}",
+            },
+        }
+
+    has_legacy_pose = hasattr(mp, "solutions") and hasattr(mp.solutions, "pose")
+    has_tasks_api = hasattr(mp, "tasks") and hasattr(mp, "Image") and hasattr(mp, "ImageFormat")
+    if has_legacy_pose:
+        try:
+            return _infer_hands_legacy(mp, frame_rgb, hand_request)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe legacy hand inference failed for the sampled frame: {exc}",
+                },
+            }
+
+    if has_tasks_api:
+        try:
+            return _infer_hands_tasks(mp, runtime, frame_rgb, hand_request)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe tasks hand inference failed for the sampled frame: {exc}",
+                },
+            }
+
+    return {
+        "ok": True,
+        "hands": [],
+        "inference_backend": "unavailable",
+        "available": False,
+        "error_info": {
+            "code": "mediapipe_package_unsupported",
+            "message": "Installed MediaPipe package exposes neither mediapipe.solutions.hands nor a usable mediapipe.tasks vision HandLandmarker path",
+        },
+        "constraints": _hand_tracking_constraints(hand_request, "unavailable", hand_available=False),
+    }
+
+
+def _apply_hand_tracking(raw_tracking_frame: Dict[str, Any], tracking: Dict[str, Any], runtime: Dict[str, Any], hands_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    frame = raw_tracking_frame.copy()
+    hand_request = _hand_tracking_request(tracking, runtime)
+    if hands_result is None and frame.get("hands") is None:
+        frame["vendor_hand_tracking"] = {
+            **hand_request,
+            "available": False,
+            "count": 0,
+            "constraints": _hand_tracking_constraints(hand_request, "unavailable", hand_available=False),
+        }
+        return frame
+
+    if hands_result is None:
+        hands_result = {
+            "ok": True,
+            "hands": frame.get("hands", []),
+            "inference_backend": "fixture",
+            "available": bool(frame.get("hands")),
+            "constraints": _hand_tracking_constraints(hand_request, "fixture", hand_available=bool(frame.get("hands"))),
+        }
+
+    if not bool(hand_request.get("enabled", False)):
+        frame.pop("hands", None)
+        frame["vendor_hand_tracking"] = {
+            **hand_request,
+            "available": False,
+            "count": 0,
+            "inference_backend": str(hands_result.get("inference_backend", "disabled")),
+            "constraints": _hand_tracking_constraints(hand_request, str(hands_result.get("inference_backend", "disabled")), hand_available=False),
+        }
+        return frame
+
+    hands = hands_result.get("hands", []) if isinstance(hands_result.get("hands", []), list) else []
+    processed_hands = [_normalize_hand_detection(hand, str(hand_request.get("landmark_mode", _HAND_LANDMARK_MODE_DEFAULT)), bool(hand_request.get("bbox_enabled", True))) for hand in hands if isinstance(hand, dict)]
+    if processed_hands:
+        frame["hands"] = processed_hands
+    else:
+        frame.pop("hands", None)
+    frame["vendor_hand_tracking"] = {
+        **hand_request,
+        "available": bool(hands_result.get("available", bool(processed_hands))),
+        "count": len(processed_hands),
+        "inference_backend": str(hands_result.get("inference_backend", "unavailable")),
+        "constraints": hands_result.get("constraints", _hand_tracking_constraints(hand_request, str(hands_result.get("inference_backend", "unavailable")), hand_available=bool(hands_result.get("available", bool(processed_hands))))),
+    }
+    if isinstance(hands_result.get("error_info"), dict):
+        frame["vendor_hand_tracking"]["error_info"] = hands_result.get("error_info")
+    if hands_result.get("model_asset_path"):
+        frame["vendor_hand_tracking"]["model_asset_path"] = hands_result.get("model_asset_path")
+    return frame
+
+
+def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], tracking: Optional[Dict[str, Any]] = None, inference_session: Optional[Dict[str, Any]] = None, tracking_semantics: Optional[Dict[str, Any]] = None, filter_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    tracking = tracking or {}
     raw_tracking_frame = sampled.get("raw_tracking_frame", {}).copy()
     notes = list(sampled.get("notes", []))
     semantics = tracking_semantics or {"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}
@@ -2145,6 +2769,12 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], infe
             raw_tracking_frame.pop("landmarks", None)
             raw_tracking_frame["tracking_state"] = "idle"
             notes.append("Fixture sample did not supply pose landmarks; tracking remains idle.")
+        raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime)
+        hand_meta = raw_tracking_frame.get("vendor_hand_tracking", {})
+        if hand_meta.get("available"):
+            notes.append(f"Fixture surfaced {int(hand_meta.get('count', 0))} raw hand sample(s) in {hand_meta.get('landmark_mode', _HAND_LANDMARK_MODE_DEFAULT)} mode.")
+        elif isinstance(hand_meta.get("error_info"), dict):
+            notes.append(str(hand_meta.get("error_info", {}).get("message", "Hand inference unavailable")))
         return {
             "ok": True,
             "raw_tracking_frame": raw_tracking_frame,
@@ -2195,11 +2825,48 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], infe
     if inferred.get("model_asset_path"):
         notes.append(f"MediaPipe tasks pose landmarker used model asset '{inferred['model_asset_path']}'.")
 
+    try:
+        if inference_session is not None:
+            cv2 = inference_session.get("cv2")
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB) if cv2 is not None else frame_bgr
+            hands_result = _infer_hands_from_session(frame_rgb, inference_session)
+        else:
+            hands_result = _infer_hands_with_mediapipe(runtime, tracking, frame_bgr)
+    except Exception as exc:
+        hands_result = {
+            "ok": False,
+            "error_info": {
+                "code": "mediapipe_inference_failed",
+                "message": f"MediaPipe hand inference failed for the sampled frame: {exc}",
+            },
+        }
+    if not bool(hands_result.get("ok", False)):
+        return {
+            "ok": False,
+            "error_info": hands_result.get("error_info", {
+                "code": "mediapipe_inference_failed",
+                "message": "MediaPipe hand inference failed for the sampled frame",
+            }),
+            "raw_tracking_frame": raw_tracking_frame,
+            "notes": notes,
+        }
+    raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime, hands_result)
+    hand_meta = raw_tracking_frame.get("vendor_hand_tracking", {})
+    if hand_meta.get("available"):
+        notes.append(f"MediaPipe hand inference produced {int(hand_meta.get('count', 0))} hand sample(s) via {hand_meta.get('inference_backend', 'mediapipe')} in {hand_meta.get('landmark_mode', _HAND_LANDMARK_MODE_DEFAULT)} mode.")
+    elif isinstance(hand_meta.get("error_info"), dict):
+        notes.append(str(hand_meta.get("error_info", {}).get("message", "Hand inference unavailable")))
+    elif bool(hand_meta.get("enabled", False)):
+        notes.append(f"MediaPipe hand inference via {hand_meta.get('inference_backend', 'mediapipe')} found no hands in the sampled frame.")
+    if hand_meta.get("model_asset_path"):
+        notes.append(f"MediaPipe hand landmarker used model asset '{hand_meta['model_asset_path']}'.")
+
     return {
         "ok": True,
         "raw_tracking_frame": raw_tracking_frame,
         "notes": notes,
     }
+
 
 
 def _preview_descriptor(preview: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2366,6 +3033,7 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
     runtime: Dict[str, Any] = selection["runtime"]
     source: Dict[str, Any] = selection["source"]
     preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
+    tracking = request.get("tracking", {}) if isinstance(request.get("tracking", {}), dict) else {}
     tracking_semantics = _tracking_semantics(request)
     selected_camera_id = str(selection["selected_camera_id"])
     cameras = selection["cameras"]
@@ -2393,7 +3061,7 @@ def _sample_once(request: Dict[str, Any], sample_index: int = 0, dynamic_timesta
             "error_info": error_info,
         }
 
-    inferred = _infer_pose_landmarks(sampled, runtime, tracking_semantics=tracking_semantics, filter_state={} if bool(tracking_semantics.get('filter_enabled', True)) else None)
+    inferred = _infer_pose_landmarks(sampled, runtime, tracking=tracking, tracking_semantics=tracking_semantics, filter_state={} if bool(tracking_semantics.get('filter_enabled', True)) else None)
     if not bool(inferred.get("ok", False)):
         error_info = inferred.get("error_info", {
             "code": "mediapipe_inference_failed",
@@ -2645,6 +3313,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
     preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
     preview_config = _preview_runtime_config(preview, runtime)
+    tracking = request.get("tracking", {}) if isinstance(request.get("tracking", {}), dict) else {}
     tracking_semantics = _tracking_semantics(request)
     tracking_filter_state: Optional[Dict[str, Any]] = {} if bool(tracking_semantics.get('filter_enabled', True)) else None
     tracking_interval = _fps_interval_seconds(runtime.get("tracking_max_fps", _DEFAULT_TRACKING_MAX_FPS), _DEFAULT_TRACKING_MAX_FPS)
@@ -2681,7 +3350,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
 
     inference_session: Optional[Dict[str, Any]] = None
     if not bool(capture_session.get("fixture_only", False)):
-        inference_session = _create_inference_session(runtime)
+        inference_session = _create_inference_session(runtime, tracking)
         if not bool(inference_session.get("ok", False)):
             _close_live_camera_capture_session(capture_session)
             snapshot = _continuous_error_snapshot(request, {
@@ -2738,7 +3407,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
                 _write_session_snapshot(session_dir, snapshot)
                 return 1
 
-            inferred = _infer_pose_landmarks(sampled, runtime, inference_session=inference_session, tracking_semantics=tracking_semantics, filter_state=tracking_filter_state)
+            inferred = _infer_pose_landmarks(sampled, runtime, tracking=tracking, inference_session=inference_session, tracking_semantics=tracking_semantics, filter_state=tracking_filter_state)
             if not bool(inferred.get("ok", False)):
                 snapshot = _continuous_error_snapshot(request, {
                     "error_info": inferred.get("error_info", {

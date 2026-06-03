@@ -185,6 +185,13 @@ class _FakePoseLandmarkerOptions:
         self.num_poses = num_poses
 
 
+class _FakeHandLandmarkerOptions:
+    def __init__(self, base_options, running_mode, num_hands=2, **_kwargs):
+        self.base_options = base_options
+        self.running_mode = running_mode
+        self.num_hands = num_hands
+
+
 class _FakePoseLandmarker:
     last_options = None
 
@@ -210,10 +217,106 @@ class _FakePoseLandmarker:
         return cls(options)
 
 
+class _FakeLegacyClassification:
+    def __init__(self, label, score):
+        self.label = label
+        self.score = score
+
+
+class _FakeLegacyHands:
+    def __init__(self, static_image_mode=True, max_num_hands=2):
+        self.static_image_mode = static_image_mode
+        self.max_num_hands = max_num_hands
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def process(self, frame_rgb):
+        return types.SimpleNamespace(
+            multi_hand_landmarks=[
+                types.SimpleNamespace(landmark=[
+                    _FakeLandmark(0.10, 0.20, -0.01, 1.0),
+                    _FakeLandmark(0.20, 0.30, -0.02, 1.0),
+                    _FakeLandmark(0.30, 0.40, -0.03, 1.0),
+                    _FakeLandmark(0.40, 0.50, -0.04, 1.0),
+                    _FakeLandmark(0.50, 0.60, -0.05, 1.0),
+                    _FakeLandmark(0.15, 0.25, -0.06, 1.0),
+                    _FakeLandmark(0.25, 0.35, -0.07, 1.0),
+                    _FakeLandmark(0.35, 0.45, -0.08, 1.0),
+                    _FakeLandmark(0.45, 0.55, -0.09, 1.0),
+                    _FakeLandmark(0.55, 0.65, -0.10, 1.0),
+                    _FakeLandmark(0.12, 0.22, -0.11, 1.0),
+                    _FakeLandmark(0.22, 0.32, -0.12, 1.0),
+                    _FakeLandmark(0.32, 0.42, -0.13, 1.0),
+                    _FakeLandmark(0.42, 0.52, -0.14, 1.0),
+                    _FakeLandmark(0.52, 0.62, -0.15, 1.0),
+                    _FakeLandmark(0.18, 0.28, -0.16, 1.0),
+                    _FakeLandmark(0.28, 0.38, -0.17, 1.0),
+                    _FakeLandmark(0.38, 0.48, -0.18, 1.0),
+                    _FakeLandmark(0.48, 0.58, -0.19, 1.0),
+                    _FakeLandmark(0.58, 0.68, -0.20, 1.0),
+                    _FakeLandmark(0.60, 0.70, -0.21, 1.0),
+                ])
+            ],
+            multi_handedness=[types.SimpleNamespace(classification=[_FakeLegacyClassification("Left", 0.91)])],
+        )
+
+
+class _FakeHandLandmarker:
+    last_options = None
+
+    def __init__(self, options):
+        self.options = options
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def detect(self, image):
+        return types.SimpleNamespace(
+            hand_landmarks=[[
+                _FakeLandmark(0.10, 0.20, -0.01, 1.0),
+                _FakeLandmark(0.20, 0.30, -0.02, 1.0),
+                _FakeLandmark(0.30, 0.40, -0.03, 1.0),
+                _FakeLandmark(0.40, 0.50, -0.04, 1.0),
+                _FakeLandmark(0.50, 0.60, -0.05, 1.0),
+                _FakeLandmark(0.15, 0.25, -0.06, 1.0),
+                _FakeLandmark(0.25, 0.35, -0.07, 1.0),
+                _FakeLandmark(0.35, 0.45, -0.08, 1.0),
+                _FakeLandmark(0.45, 0.55, -0.09, 1.0),
+                _FakeLandmark(0.55, 0.65, -0.10, 1.0),
+                _FakeLandmark(0.12, 0.22, -0.11, 1.0),
+                _FakeLandmark(0.22, 0.32, -0.12, 1.0),
+                _FakeLandmark(0.32, 0.42, -0.13, 1.0),
+                _FakeLandmark(0.42, 0.52, -0.14, 1.0),
+                _FakeLandmark(0.52, 0.62, -0.15, 1.0),
+                _FakeLandmark(0.18, 0.28, -0.16, 1.0),
+                _FakeLandmark(0.28, 0.38, -0.17, 1.0),
+                _FakeLandmark(0.38, 0.48, -0.18, 1.0),
+                _FakeLandmark(0.48, 0.58, -0.19, 1.0),
+                _FakeLandmark(0.58, 0.68, -0.20, 1.0),
+                _FakeLandmark(0.60, 0.70, -0.21, 1.0),
+            ]],
+            handedness=[[types.SimpleNamespace(category_name="Right", score=0.87)]],
+        )
+
+    @classmethod
+    def create_from_options(cls, options):
+        cls.last_options = options
+        return cls(options)
+
+
 def _fake_tasks_mediapipe_module():
     vision_module = types.SimpleNamespace(
         PoseLandmarker=_FakePoseLandmarker,
         PoseLandmarkerOptions=_FakePoseLandmarkerOptions,
+        HandLandmarker=_FakeHandLandmarker,
+        HandLandmarkerOptions=_FakeHandLandmarkerOptions,
         RunningMode=types.SimpleNamespace(IMAGE="IMAGE"),
     )
     tasks_module = types.SimpleNamespace()
@@ -235,7 +338,8 @@ def _fake_tasks_mediapipe_module():
 
 def _fake_legacy_mediapipe_module():
     pose_namespace = types.SimpleNamespace(Pose=_FakeLegacyPose)
-    solutions_namespace = types.SimpleNamespace(pose=pose_namespace)
+    hands_namespace = types.SimpleNamespace(Hands=_FakeLegacyHands)
+    solutions_namespace = types.SimpleNamespace(pose=pose_namespace, hands=hands_namespace)
     mp_module = types.SimpleNamespace(solutions=solutions_namespace)
     return {"mediapipe": mp_module}
 
@@ -317,6 +421,79 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             {"id": 0, "x": 0.25, "y": 0.5, "z": -0.1, "visibility": 0.9},
             {"id": 1, "x": 0.6, "y": 0.4, "z": -0.2, "visibility": 0.8},
         ])
+
+    def test_tasks_hand_path_emits_lite_bbox_payload_when_model_is_available(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pose_model_path = Path(temp_dir) / "pose_landmarker_lite.task"
+            pose_model_path.write_bytes(b"pose-model")
+            hand_model_path = Path(temp_dir) / "hand_landmarker.task"
+            hand_model_path.write_bytes(b"hand-model")
+            runtime = {
+                "working_directory": temp_dir,
+                "pose_landmarker_model_path": str(pose_model_path),
+                "hand_landmarker_model_path": str(hand_model_path),
+            }
+            tracking = {"hands": {"enabled": True, "landmark_mode": "lite", "bbox": {"enabled": True}}}
+            with mock.patch.dict("sys.modules", {"cv2": _FakeCv2, **_fake_tasks_mediapipe_module()}, clear=False):
+                hands_result = probe._infer_hands_with_mediapipe(runtime, tracking, frame_bgr=[[0]])
+                frame = probe._apply_hand_tracking({"timestamp_ms": 1}, tracking, runtime, hands_result)
+            self.assertTrue(hands_result["ok"])
+            self.assertEqual(hands_result["inference_backend"], "mediapipe_tasks_hand_landmarker")
+            self.assertEqual(frame["vendor_hand_tracking"]["count"], 1)
+            self.assertEqual(frame["vendor_hand_tracking"]["landmark_mode"], "lite")
+            self.assertEqual(frame["hands"][0]["label"], "right")
+            self.assertEqual(frame["hands"][0]["landmark_count_before"], 21)
+            self.assertEqual(frame["hands"][0]["landmark_count_after"], 11)
+            self.assertEqual(frame["hands"][0]["bbox"]["landmark_mode"], "lite")
+            self.assertAlmostEqual(frame["hands"][0]["bbox"]["x"], 0.10, places=6)
+            self.assertAlmostEqual(frame["hands"][0]["bbox"]["y"], 0.20, places=6)
+            self.assertAlmostEqual(frame["hands"][0]["bbox"]["width"], 0.50, places=6)
+            self.assertAlmostEqual(frame["hands"][0]["bbox"]["height"], 0.50, places=6)
+            self.assertAlmostEqual(frame["hands"][0]["bbox"]["area"], 0.25, places=6)
+            self.assertEqual(_FakeHandLandmarker.last_options.base_options.model_asset_path, str(hand_model_path))
+
+    def test_fixture_hands_are_normalized_with_full_landmark_mode(self):
+        runtime = {"working_directory": tempfile.gettempdir()}
+        tracking = {"hands": {"enabled": True, "landmark_mode": "full", "bbox": {"enabled": True}}}
+        sampled = {
+            "fixture_used": True,
+            "raw_tracking_frame": {
+                "timestamp_ms": 1,
+                "source_kind": "live_camera",
+                "source_id": "/dev/video0",
+                "tracking_state": "idle",
+                "frame_size": {"x": 640, "y": 480},
+                "hands": [{
+                    "index": 0,
+                    "label": "Left",
+                    "score": 0.9,
+                    "landmarks": [
+                        {"id": i, "x": 0.1 + (0.02 * i), "y": 0.2 + (0.01 * i), "z": -0.01 * i, "visibility": 1.0}
+                        for i in range(21)
+                    ],
+                }],
+            },
+            "notes": [],
+        }
+        result = probe._infer_pose_landmarks(sampled, runtime, tracking=tracking, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
+        self.assertTrue(result["ok"])
+        hand = result["raw_tracking_frame"]["hands"][0]
+        self.assertEqual(hand["landmark_count_after"], 21)
+        self.assertEqual(hand["bbox"]["landmark_mode"], "full")
+        self.assertGreater(hand["bbox"]["area"], 0.0)
+        self.assertEqual(result["raw_tracking_frame"]["vendor_hand_tracking"]["count"], 1)
+
+    def test_tasks_hand_path_surfaces_unavailable_when_model_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = {"working_directory": temp_dir}
+            tracking = {"hands": {"enabled": True, "landmark_mode": "lite", "bbox": {"enabled": True}}}
+            with mock.patch.dict("sys.modules", {"cv2": _FakeCv2, **_fake_tasks_mediapipe_module()}, clear=False):
+                hands_result = probe._infer_hands_with_mediapipe(runtime, tracking, frame_bgr=[[0]])
+                frame = probe._apply_hand_tracking({"timestamp_ms": 1}, tracking, runtime, hands_result)
+            self.assertTrue(hands_result["ok"])
+            self.assertFalse(frame["vendor_hand_tracking"]["available"])
+            self.assertEqual(frame["vendor_hand_tracking"]["error_info"]["code"], "mediapipe_model_missing")
+            self.assertFalse("hands" in frame)
 
     def test_runtime_reports_unsupported_package_when_neither_legacy_nor_tasks_api_exists(self):
         runtime = {"working_directory": os.getcwd()}
@@ -721,9 +898,10 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             ("/dev/video0", "default"): {"opened": True, "width": 1920, "height": 1080, "fps": 5.0, "fourcc": "YUYV"},
         }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
-            with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 30.0}):
-                with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
-                    result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+            with mock.patch.object(probe, "_enumerate_cameras", return_value=[{"camera_id": "/dev/video0", "id": "/dev/video0", "label": "video0", "available": True}]):
+                with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 30.0}):
+                    with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
+                        result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
         self.assertTrue(result["ok"])
         capture_mode = result["health"]["capture_mode"]
         self.assertEqual(capture_mode["backend"], "CAP_V4L2")
@@ -760,9 +938,10 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             ("/dev/video0", "default"): {"opened": True, "width": 1280, "height": 720, "fps": 30.0, "fourcc": "MJPG"},
         }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
-            with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 30.0}):
-                with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
-                    result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+            with mock.patch.object(probe, "_enumerate_cameras", return_value=[{"camera_id": "/dev/video0", "id": "/dev/video0", "label": "video0", "available": True}]):
+                with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 30.0}):
+                    with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
+                        result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
         self.assertTrue(result["ok"])
         capture_mode = result["health"]["capture_mode"]
         self.assertEqual(capture_mode["backend"], "default")
@@ -881,9 +1060,14 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
 	Size: Discrete 960x540
 		Interval: Discrete 0.033s (30.000 fps)
 """
+        _FakeNegotiationCv2.PROFILES = {
+            ("/dev/video0", "CAP_V4L2"): {"opened": True, "width": 1280, "height": 720, "fps": 30.0, "fourcc": "MJPG"},
+        }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
-            with mock.patch.object(probe.subprocess, "run", return_value=_FakeCompletedProcess(stdout=stdout)):
-                result = probe._success_response(request)
+            with mock.patch.object(probe, "_enumerate_cameras", return_value=[{"camera_id": "/dev/video0", "id": "/dev/video0", "label": "video0", "available": True}]):
+                with mock.patch.object(probe.subprocess, "run", return_value=_FakeCompletedProcess(stdout=stdout)):
+                    with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2}, clear=False):
+                        result = probe._success_response(request)
         self.assertTrue(result["ok"])
         self.assertEqual(result["camera_options"]["reported_source"], "reported_v4l2")
         self.assertEqual(result["camera_options"]["probe_strategy"], "reported_v4l2_ranked_shortlist")
@@ -921,9 +1105,10 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             ("/dev/video0", "CAP_V4L2"): {"opened": True, "width": 1280, "height": 720, "fps": 30.0, "fourcc": "MJPG"},
         }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
-            with mock.patch.object(probe.subprocess, "run", return_value=_FakeCompletedProcess(stdout=stdout)):
-                with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
-                    result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
+            with mock.patch.object(probe, "_enumerate_cameras", return_value=[{"camera_id": "/dev/video0", "id": "/dev/video0", "label": "video0", "available": True}]):
+                with mock.patch.object(probe.subprocess, "run", return_value=_FakeCompletedProcess(stdout=stdout)):
+                    with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2, **_fake_legacy_mediapipe_module()}, clear=False):
+                        result = probe._sample_once(request, sample_index=0, dynamic_timestamp=False)
         self.assertTrue(result["ok"])
         capture_mode = result["health"]["capture_mode"]
         self.assertEqual(capture_mode["reported_source"], "reported_v4l2")
@@ -954,10 +1139,11 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             ("/dev/video0", "default"): {"opened": True, "width": 640, "height": 480, "fps": 15.0, "fourcc": "YUYV"},
         }
         with mock.patch.object(probe.platform, "system", return_value="Linux"):
-            with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError()):
-                with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 15.0}):
-                    with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2}, clear=False):
-                        result = probe._success_response(request)
+            with mock.patch.object(probe, "_enumerate_cameras", return_value=[{"camera_id": "/dev/video0", "id": "/dev/video0", "label": "video0", "available": True}]):
+                with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError()):
+                    with mock.patch.object(probe, "_measure_live_camera_runtime_burst", return_value={"ok": True, "observed_fps": 15.0}):
+                        with mock.patch.dict("sys.modules", {"cv2": _FakeNegotiationCv2}, clear=False):
+                            result = probe._success_response(request)
         self.assertTrue(result["ok"])
         self.assertEqual(result["camera_options"]["reported_source"], "fallback_probe_sweep")
         self.assertEqual(result["camera_options"]["probe_strategy"], "bounded_probe_sweep")

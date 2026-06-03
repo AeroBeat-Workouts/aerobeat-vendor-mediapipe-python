@@ -112,13 +112,25 @@ func test_vendor_runtime_config_translation_keeps_public_shape_and_vendor_overri
 			"camera_id": "/dev/video0"
 		},
 		"tracking": {
-			"min_visibility": 0.6
+			"min_visibility": 0.6,
+			"hands": {
+				"enabled": true,
+				"landmark_mode": "full",
+				"inference_interval_frames": 2,
+				"bbox_recompute_interval_frames": 3,
+				"bbox": {"enabled": true},
+				"validity": {
+					"max_stale_frames": 4,
+					"reacquire_stable_frames": 5
+				}
+			}
 		},
 		"runtime": {
 			"python_executable": "python3.13",
 			"entrypoint": "scripts/run_backend.py",
 			"model_complexity": 2,
-			"pose_landmarker_model_path": "models/pose_landmarker_heavy.task"
+			"pose_landmarker_model_path": "models/pose_landmarker_heavy.task",
+			"hand_landmarker_model_path": "models/hand_landmarker.task"
 		}
 	})
 
@@ -130,6 +142,14 @@ func test_vendor_runtime_config_translation_keeps_public_shape_and_vendor_overri
 	assert_eq(vendor_config["runtime"]["entrypoint"], "scripts/run_backend.py")
 	assert_eq(int(vendor_config["runtime"]["model_complexity"]), 2)
 	assert_eq(vendor_config["runtime"]["pose_landmarker_model_path"], "models/pose_landmarker_heavy.task")
+	assert_eq(vendor_config["runtime"]["hand_landmarker_model_path"], "models/hand_landmarker.task")
+	assert_true(bool(vendor_config["tracking"]["hands"].get("enabled", false)))
+	assert_eq(String(vendor_config["tracking"]["hands"].get("landmark_mode", "")), "full")
+	assert_eq(int(vendor_config["runtime"].get("hand_inference_interval_frames", 0)), 2)
+	assert_eq(int(vendor_config["runtime"].get("hand_bbox_recompute_interval_frames", 0)), 3)
+	assert_eq(int(vendor_config["runtime"].get("hand_max_stale_frames", 0)), 4)
+	assert_eq(int(vendor_config["runtime"].get("hand_reacquire_stable_frames", 0)), 5)
+	assert_true(bool(vendor_config["runtime"].get("hand_bbox_enabled", false)))
 	assert_true(bool(vendor_config["runtime"].get("filter_enabled", false)))
 	assert_false(bool(vendor_config["runtime"].get("no_filter", true)))
 	assert_eq(MediaPipePythonConfig.get_required_model_filename(2), "pose_landmarker_heavy.task")
@@ -166,7 +186,22 @@ func test_inventory_and_frame_mapper_normalize_vendor_payloads() -> void:
 		"frame_size": {"x": 640, "y": 480},
 		"landmarks": [
 			{"id": 1, "x": 0.2, "y": 0.3, "z": -0.1, "visibility": 0.9}
-		]
+		],
+		"hands": [
+			{
+				"index": 0,
+				"label": "left",
+				"score": 0.9,
+				"landmark_mode": "lite",
+				"landmarks": [{"id": 0, "x": 0.1, "y": 0.2, "z": 0.0, "visibility": 1.0}],
+				"bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4, "area": 0.12}
+			}
+		],
+		"vendor_hand_tracking": {
+			"enabled": true,
+			"landmark_mode": "lite",
+			"count": 1
+		}
 	}, {
 		"source": {"camera_id": "/dev/video0"},
 		"preview": {"flip_horizontal": false}
@@ -181,6 +216,11 @@ func test_inventory_and_frame_mapper_normalize_vendor_payloads() -> void:
 	assert_eq(frame["landmarks"].size(), 1)
 	assert_eq(int(frame["landmarks"][0]["id"]), 1)
 	assert_eq(float(frame["landmarks"][0]["visibility"]), 0.9)
+	assert_eq(frame["hands"].size(), 1)
+	assert_eq(String(frame["hands"][0].get("label", "")), "left")
+	assert_eq(float(frame["hands"][0].get("bbox", {}).get("area", 0.0)), 0.12)
+	assert_true(frame.has("vendor_hand_tracking"))
+	assert_eq(int(frame.get("vendor_hand_tracking", {}).get("count", 0)), 1)
 
 func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> void:
 	var bridge := FakeRuntimeBridge.new()
