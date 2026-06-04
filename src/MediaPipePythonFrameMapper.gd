@@ -15,6 +15,10 @@ static func map_raw_frame(raw_frame: Dictionary, config: Dictionary = {}) -> Dic
 	var frame := empty(config)
 	for key in raw_frame.keys():
 		frame[key] = raw_frame[key]
+	if raw_frame.has("frame_index") == false:
+		frame.erase("frame_index")
+	if raw_frame.has("timestamp_seconds") == false:
+		frame.erase("timestamp_seconds")
 	frame["backend"] = MediaPipePythonConfig.BACKEND_ID
 	frame["backend_request"] = _normalize_requested_backend(config.get("backend", DEFAULT_BACKEND_REQUEST))
 	frame["backend_impl"] = MediaPipePythonConfig.BACKEND_ID

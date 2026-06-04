@@ -6,6 +6,7 @@ const MediaPipePythonCameraInventory = preload("res://../src/MediaPipePythonCame
 const MediaPipePythonFrameMapper = preload("res://../src/MediaPipePythonFrameMapper.gd")
 const MediaPipePythonRuntimeHealth = preload("res://../src/MediaPipePythonRuntimeHealth.gd")
 const CameraTracking = preload("res://addons/aerobeat-tool-camera-tracking/src/CameraTracking.gd")
+const CameraTrackingFrame = preload("res://addons/aerobeat-tool-camera-tracking/src/CameraTrackingFrame.gd")
 
 class FakeRuntimeBridge extends "res://../src/MediaPipePythonRuntimeBridge.gd":
 	var startup_configs: Array = []
@@ -213,6 +214,8 @@ func test_inventory_and_frame_mapper_normalize_vendor_payloads() -> void:
 	assert_false(frame["preview_transform"]["flip_horizontal"])
 	assert_eq(frame["tracking_state"], "tracked")
 	assert_eq(frame["confidence"], 0.0)
+	assert_false(frame.has("frame_index"))
+	assert_false(frame.has("timestamp_seconds"))
 	assert_eq(frame["landmarks"].size(), 1)
 	assert_eq(int(frame["landmarks"][0]["id"]), 1)
 	assert_eq(float(frame["landmarks"][0]["visibility"]), 0.9)
@@ -221,6 +224,13 @@ func test_inventory_and_frame_mapper_normalize_vendor_payloads() -> void:
 	assert_eq(float(frame["hands"][0].get("bbox", {}).get("area", 0.0)), 0.12)
 	assert_true(frame.has("vendor_hand_tracking"))
 	assert_eq(int(frame.get("vendor_hand_tracking", {}).get("count", 0)), 1)
+
+	var previous_frame := CameraTrackingFrame.normalize({"timestamp_ms": 21}, {}, {})
+	var normalized_frame := CameraTrackingFrame.normalize(frame, {}, previous_frame)
+	assert_eq(int(normalized_frame.get("frame_index", 0)), 2)
+	assert_eq(float(normalized_frame.get("timestamp_seconds", 0.0)), 0.042)
+	assert_eq(int(normalized_frame.get("hands", {}).get("left", {}).get("frame_index", 0)), 2)
+	assert_eq(float(normalized_frame.get("hands", {}).get("left", {}).get("timestamp_seconds", 0.0)), 0.042)
 
 func test_backend_bootstrap_shell_tracks_runtime_health_and_contract_shape() -> void:
 	var bridge := FakeRuntimeBridge.new()
