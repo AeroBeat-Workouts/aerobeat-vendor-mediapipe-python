@@ -7,9 +7,9 @@
       "subfolder": "/"
     },
     "aerobeat-tool-camera-tracking": {
-      "url": "git@github.com:AeroBeat-Workouts/aerobeat-tool-camera-tracking.git",
-      "checkout": "25f52da",
-      "subfolder": "/"
+      "url": "../../aerobeat-tool-camera-tracking",
+      "subfolder": "/",
+      "source": "symlink"
     },
     "aerobeat-tool-core": {
       "url": "../../aerobeat-tool-core",

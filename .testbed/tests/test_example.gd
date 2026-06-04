@@ -29,16 +29,16 @@ func test_plugin_cfg_is_vendor_specific() -> void:
 		"plugin.cfg description should describe the bootstrap seam"
 	)
 
-func test_addons_manifest_pins_camera_tracking_contract_for_repo_local_validation() -> void:
+func test_addons_manifest_symlinks_camera_tracking_for_repo_local_validation() -> void:
 	var manifest_text := _read_repo_file(ADDONS_MANIFEST_PATH)
 	var block_start := manifest_text.find('"aerobeat-tool-camera-tracking": {')
 	var next_block_start := manifest_text.find('"aerobeat-tool-core": {')
-	assert_true(block_start >= 0, "addons manifest should pin aerobeat-tool-camera-tracking for backend validation")
+	assert_true(block_start >= 0, "addons manifest should include aerobeat-tool-camera-tracking for backend validation")
 	assert_true(next_block_start > block_start, "camera-tracking manifest block should end before aerobeat-tool-core")
 	var camera_tracking_block := manifest_text.substr(block_start, next_block_start - block_start)
-	assert_true(camera_tracking_block.contains('"git@github.com:AeroBeat-Workouts/aerobeat-tool-camera-tracking.git"'), "addons manifest should point camera tracking at the SSH git remote")
-	assert_true(camera_tracking_block.contains('"checkout": "25f52da"'), "addons manifest should pin the approved contract-shell commit")
-	assert_false(camera_tracking_block.contains('"url": "../../aerobeat-tool-camera-tracking"'), "addons manifest should not use a local camera-tracking path for repo-local validation")
-	assert_false(camera_tracking_block.contains('"source": "symlink"'), "addons manifest should not symlink the pinned camera-tracking contract dependency")
+	assert_true(camera_tracking_block.contains('"url": "../../aerobeat-tool-camera-tracking"'), "addons manifest should use the repo-local camera-tracking path for validation")
+	assert_true(camera_tracking_block.contains('"source": "symlink"'), "addons manifest should symlink the repo-local camera-tracking dependency")
+	assert_false(camera_tracking_block.contains('"git@github.com:AeroBeat-Workouts/aerobeat-tool-camera-tracking.git"'), "addons manifest should not point camera tracking at an SSH git remote")
+	assert_false(camera_tracking_block.contains('"checkout": "25f52da"'), "addons manifest should not pin camera tracking to a git checkout for repo-local validation")
 	assert_true(manifest_text.contains('"aerobeat-tool-core"'), "addons manifest should keep aerobeat-tool-core available")
 	assert_true(manifest_text.contains('"aerobeat-vendor-godot-unit-test"'), "addons manifest should keep the vendor unit-test addon available")
