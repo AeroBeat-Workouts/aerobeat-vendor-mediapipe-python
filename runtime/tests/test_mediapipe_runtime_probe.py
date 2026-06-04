@@ -483,6 +483,23 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertGreater(hand["bbox"]["area"], 0.0)
         self.assertEqual(result["raw_tracking_frame"]["vendor_hand_tracking"]["count"], 1)
 
+    def test_hand_landmarks_from_source_tolerates_none_numeric_fields(self):
+        landmarks = probe._hand_landmarks_from_source([
+            types.SimpleNamespace(x=None, y=0.25, z=None, visibility=None),
+            types.SimpleNamespace(x=0.5, y=None, z=-0.75, visibility=0.6),
+        ])
+        self.assertEqual(len(landmarks), 2)
+        self.assertEqual(landmarks[0]["id"], 0)
+        self.assertEqual(landmarks[1]["id"], 1)
+        self.assertEqual(landmarks[0]["x"], 0.0)
+        self.assertEqual(landmarks[0]["y"], 0.25)
+        self.assertEqual(landmarks[0]["z"], 0.0)
+        self.assertEqual(landmarks[0]["visibility"], 1.0)
+        self.assertEqual(landmarks[1]["x"], 0.5)
+        self.assertEqual(landmarks[1]["y"], 0.0)
+        self.assertEqual(landmarks[1]["z"], -0.75)
+        self.assertEqual(landmarks[1]["visibility"], 0.6)
+
     def test_tasks_hand_path_surfaces_unavailable_when_model_is_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime = {"working_directory": temp_dir}

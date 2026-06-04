@@ -209,6 +209,13 @@ def _normalize_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _float_or_default(value: Any, default: float) -> float:
+    try:
+        return float(default if value is None else value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _normalize_tracking_overlay_mode(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     if normalized == "full":
@@ -541,10 +548,10 @@ def _hand_landmarks_from_source(landmarks_source: Any) -> List[Dict[str, float]]
     for landmark in landmarks_source:
         landmarks.append({
             "id": len(landmarks),
-            "x": float(getattr(landmark, "x", 0.0)),
-            "y": float(getattr(landmark, "y", 0.0)),
-            "z": float(getattr(landmark, "z", 0.0)),
-            "visibility": float(getattr(landmark, "visibility", 1.0)),
+            "x": _float_or_default(getattr(landmark, "x", 0.0), 0.0),
+            "y": _float_or_default(getattr(landmark, "y", 0.0), 0.0),
+            "z": _float_or_default(getattr(landmark, "z", 0.0), 0.0),
+            "visibility": _float_or_default(getattr(landmark, "visibility", 1.0), 1.0),
         })
     return landmarks
 
