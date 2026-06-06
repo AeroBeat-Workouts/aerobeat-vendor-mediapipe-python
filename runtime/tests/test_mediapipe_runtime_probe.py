@@ -579,6 +579,60 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertEqual(second_frame["vendor_pose_tracking"]["carried_forward"], True)
         self.assertEqual(second_frame["vendor_pose_tracking"]["source_frame_index"], 0)
 
+    def test_hand_inference_interval_frames_carries_forward_last_hand_sample(self):
+        runtime = {"working_directory": tempfile.gettempdir()}
+        tracking = {"pose": {"enabled": True, "inference_interval_frames": 1}, "hands": {"enabled": True, "landmark_mode": "lite", "inference_interval_frames": 2, "bbox": {"enabled": True}, "validity": {"max_stale_ms": 80, "reacquire_stable_ms": 0}}}
+        inference_session = {}
+        first = probe._infer_pose_landmarks({
+            "fixture_used": True,
+            "raw_tracking_frame": {
+                "timestamp_ms": 1,
+                "frame_index": 0,
+                "source_kind": "live_camera",
+                "source_id": "/dev/video0",
+                "tracking_state": "idle",
+                "hands": [{
+                    "label": "Left",
+                    "score": 0.91,
+                    "landmarks": [{"id": 0, "x": 0.25, "y": 0.50, "z": -0.1, "visibility": 0.9}],
+                    "bbox": {"x": 0.20, "y": 0.40, "width": 0.10, "height": 0.20},
+                }],
+            },
+            "notes": [],
+        }, runtime, tracking=tracking, inference_session=inference_session, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
+        self.assertTrue(first["ok"])
+        first_frame = first["raw_tracking_frame"]
+        self.assertEqual(first_frame["vendor_hand_tracking"]["inference_ran"], True)
+        self.assertEqual(first_frame["vendor_hand_tracking"]["carried_forward"], False)
+        self.assertEqual(first_frame["vendor_hand_tracking"]["source_frame_index"], 0)
+        self.assertEqual(len(first_frame.get("hands", [])), 1)
+
+        second = probe._infer_pose_landmarks({
+            "fixture_used": True,
+            "raw_tracking_frame": {
+                "timestamp_ms": 41,
+                "frame_index": 1,
+                "source_kind": "live_camera",
+                "source_id": "/dev/video0",
+                "tracking_state": "idle",
+                "hands": [{
+                    "label": "Left",
+                    "score": 0.33,
+                    "landmarks": [{"id": 0, "x": 0.75, "y": 0.10, "z": -0.4, "visibility": 0.2}],
+                    "bbox": {"x": 0.60, "y": 0.10, "width": 0.20, "height": 0.15},
+                }],
+            },
+            "notes": [],
+        }, runtime, tracking=tracking, inference_session=inference_session, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
+        self.assertTrue(second["ok"])
+        second_frame = second["raw_tracking_frame"]
+        self.assertEqual(second_frame["frame_index"], 1)
+        self.assertEqual(second_frame["timestamp_ms"], 41)
+        self.assertEqual(second_frame.get("hands"), first_frame.get("hands"))
+        self.assertEqual(second_frame["vendor_hand_tracking"]["inference_ran"], False)
+        self.assertEqual(second_frame["vendor_hand_tracking"]["carried_forward"], True)
+        self.assertEqual(second_frame["vendor_hand_tracking"]["source_frame_index"], 0)
+
     def test_hand_landmarks_from_source_tolerates_none_numeric_fields(self):
         landmarks = probe._hand_landmarks_from_source([
             types.SimpleNamespace(x=None, y=0.25, z=None, visibility=None),

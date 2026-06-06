@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import glob
 import json
 import math
@@ -487,7 +488,6 @@ def _hand_tracking_request(tracking: Dict[str, Any], runtime: Optional[Dict[str,
         "landmark_mode": _normalize_hand_landmark_mode(tracking, runtime),
         "bbox_enabled": bool(runtime.get("hand_bbox_enabled", bbox.get("enabled", True))),
         "inference_interval_frames": max(1, int(runtime.get("hand_inference_interval_frames", hands.get("inference_interval_frames", 1)) or 1)),
-        "bbox_recompute_interval_frames": max(1, int(runtime.get("hand_bbox_recompute_interval_frames", hands.get("bbox_recompute_interval_frames", 1)) or 1)),
         "max_stale_ms": max(0, int(runtime.get("hand_max_stale_ms", runtime.get("hand_max_stale_frames", validity.get("max_stale_ms", validity.get("max_stale_frames", 80)))) or 0)),
         "reacquire_stable_ms": max(0, int(runtime.get("hand_reacquire_stable_ms", runtime.get("hand_reacquire_stable_frames", validity.get("reacquire_stable_ms", validity.get("reacquire_stable_frames", 40)))) or 0)),
     }
@@ -499,7 +499,7 @@ def _hand_tracking_constraints(request: Dict[str, Any], backend: str, hand_avail
         f"Hand landmark mode '{mode}' derives bbox geometry from the same emitted landmark subset, so lite mode intentionally under-bounds compared with full mode.",
         "MediaPipe does not expose stable per-hand track IDs in this slice; higher layers must not assume handedness labels remain bound across frames.",
         "Preview mirroring is a presentation transform only; raw hand coordinates stay camera-native and must be mirrored consistently upstream alongside pose.",
-        f"This vendor slice surfaces requested hand cadence and timing budget only (inference every {int(request.get('inference_interval_frames', 1))} frame(s), bbox recompute every {int(request.get('bbox_recompute_interval_frames', 1))} frame(s), max stale {int(request.get('max_stale_ms', 0))}ms, reacquire stable {int(request.get('reacquire_stable_ms', 0))}ms); actual stale/reacquire semantics remain an upstream responsibility.",
+        f"This vendor slice surfaces requested hand cadence and timing budget only (inference every {int(request.get('inference_interval_frames', 1))} frame(s), max stale {int(request.get('max_stale_ms', 0))}ms, reacquire stable {int(request.get('reacquire_stable_ms', 0))}ms); actual stale/reacquire semantics remain an upstream responsibility.",
     ]
     if backend == "mediapipe_tasks_hand_landmarker":
         constraints.append("MediaPipe tasks hand inference runs in IMAGE mode here, so each frame is an independent detection with no vendor-side interpolation or per-hand timestamps.")
@@ -2706,7 +2706,7 @@ def _infer_hands_with_mediapipe(runtime: Dict[str, Any], tracking: Dict[str, Any
     }
 
 
-def _apply_hand_tracking(raw_tracking_frame: Dict[str, Any], tracking: Dict[str, Any], runtime: Dict[str, Any], hands_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _apply_hand_tracking(raw_tracking_frame: Dict[str, Any], tracking: Dict[str, Any], runtime: Dict[str, Any], hands_result: Optional[Dict[str, Any]] = None, inference_ran: bool = False, carried_forward: bool = False, source_frame_index: int = -1) -> Dict[str, Any]:
     frame = raw_tracking_frame.copy()
     hand_request = _hand_tracking_request(tracking, runtime)
     if hands_result is None and frame.get("hands") is None:
@@ -2714,6 +2714,9 @@ def _apply_hand_tracking(raw_tracking_frame: Dict[str, Any], tracking: Dict[str,
             **hand_request,
             "available": False,
             "count": 0,
+            "inference_ran": inference_ran,
+            "carried_forward": carried_forward,
+            "source_frame_index": source_frame_index,
             "constraints": _hand_tracking_constraints(hand_request, "unavailable", hand_available=False),
         }
         return frame
@@ -2734,6 +2737,9 @@ def _apply_hand_tracking(raw_tracking_frame: Dict[str, Any], tracking: Dict[str,
             "available": False,
             "count": 0,
             "inference_backend": str(hands_result.get("inference_backend", "disabled")),
+            "inference_ran": inference_ran,
+            "carried_forward": carried_forward,
+            "source_frame_index": source_frame_index,
             "constraints": _hand_tracking_constraints(hand_request, str(hands_result.get("inference_backend", "disabled")), hand_available=False),
         }
         return frame
@@ -2749,6 +2755,9 @@ def _apply_hand_tracking(raw_tracking_frame: Dict[str, Any], tracking: Dict[str,
         "available": bool(hands_result.get("available", bool(processed_hands))),
         "count": len(processed_hands),
         "inference_backend": str(hands_result.get("inference_backend", "unavailable")),
+        "inference_ran": inference_ran,
+        "carried_forward": carried_forward,
+        "source_frame_index": source_frame_index,
         "constraints": hands_result.get("constraints", _hand_tracking_constraints(hand_request, str(hands_result.get("inference_backend", "unavailable")), hand_available=bool(hands_result.get("available", bool(processed_hands))))),
     }
     if isinstance(hands_result.get("error_info"), dict):
@@ -2763,6 +2772,50 @@ def _current_pose_frame_index(raw_tracking_frame: Dict[str, Any]) -> int:
         return max(0, int(raw_tracking_frame.get("frame_index", 0) or 0))
     except (TypeError, ValueError):
         return 0
+
+
+
+def _hand_frame_with_current_sample(prior_hand_frame: Dict[str, Any], current_sample_frame: Dict[str, Any], request: Dict[str, Any], inference_ran: bool, carried_forward: bool) -> Dict[str, Any]:
+    carried = current_sample_frame.copy()
+    if "hands" in prior_hand_frame:
+        carried["hands"] = copy.deepcopy(prior_hand_frame.get("hands", []))
+    else:
+        carried.pop("hands", None)
+    carried["vendor_hand_tracking"] = {
+        **request,
+        "available": bool(prior_hand_frame.get("vendor_hand_tracking", {}).get("available", bool(carried.get("hands")))) if isinstance(prior_hand_frame.get("vendor_hand_tracking", {}), dict) else bool(carried.get("hands")),
+        "count": len(carried.get("hands", [])) if isinstance(carried.get("hands", []), list) else 0,
+        "inference_backend": str(prior_hand_frame.get("vendor_hand_tracking", {}).get("inference_backend", "fixture")) if isinstance(prior_hand_frame.get("vendor_hand_tracking", {}), dict) else "fixture",
+        "inference_ran": inference_ran,
+        "carried_forward": carried_forward,
+        "source_frame_index": _current_pose_frame_index(prior_hand_frame),
+        "constraints": prior_hand_frame.get("vendor_hand_tracking", {}).get("constraints", _hand_tracking_constraints(request, "fixture", hand_available=bool(carried.get("hands")))) if isinstance(prior_hand_frame.get("vendor_hand_tracking", {}), dict) else _hand_tracking_constraints(request, "fixture", hand_available=bool(carried.get("hands"))),
+    }
+    if isinstance(prior_hand_frame.get("vendor_hand_tracking", {}).get("error_info"), dict):
+        carried["vendor_hand_tracking"]["error_info"] = prior_hand_frame.get("vendor_hand_tracking", {}).get("error_info")
+    if prior_hand_frame.get("vendor_hand_tracking", {}).get("model_asset_path"):
+        carried["vendor_hand_tracking"]["model_asset_path"] = prior_hand_frame.get("vendor_hand_tracking", {}).get("model_asset_path")
+    return carried
+
+
+
+def _skip_hand_inference(raw_tracking_frame: Dict[str, Any], tracking: Dict[str, Any], runtime: Dict[str, Any], inference_session: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    prior_hand_frame = inference_session.get("last_hand_frame") if isinstance(inference_session, dict) else None
+    hand_request = _hand_tracking_request(tracking, runtime)
+    if isinstance(prior_hand_frame, dict) and prior_hand_frame:
+        return _hand_frame_with_current_sample(prior_hand_frame, raw_tracking_frame, hand_request, inference_ran=False, carried_forward=True)
+    idle_frame = raw_tracking_frame.copy()
+    idle_frame.pop("hands", None)
+    idle_frame = _apply_hand_tracking(idle_frame, tracking, runtime, inference_ran=False, carried_forward=False, source_frame_index=-1)
+    return idle_frame
+
+
+
+def _finalize_hand_frame(raw_tracking_frame: Dict[str, Any], inference_session: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if isinstance(inference_session, dict):
+        inference_session["last_hand_frame"] = copy.deepcopy(raw_tracking_frame)
+        inference_session["last_hand_frame_index"] = _current_pose_frame_index(raw_tracking_frame)
+    return raw_tracking_frame
 
 
 
@@ -2825,7 +2878,7 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], trac
             "inference_ran": False,
             "carried_forward": False,
         }
-        raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime)
+        raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime, inference_ran=False, carried_forward=False, source_frame_index=-1)
         return {
             "ok": True,
             "raw_tracking_frame": raw_tracking_frame,
@@ -2836,6 +2889,10 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], trac
     last_pose_frame_index = int(inference_session.get("last_pose_frame_index", -1)) if isinstance(inference_session, dict) else -1
     pose_interval = int(pose_request.get("inference_interval_frames", 1))
     should_run_pose_inference = pose_interval <= 1 or last_pose_frame_index < 0 or current_frame_index <= last_pose_frame_index or (current_frame_index - last_pose_frame_index) >= pose_interval
+    hand_request = _hand_tracking_request(tracking, runtime)
+    last_hand_frame_index = int(inference_session.get("last_hand_frame_index", -1)) if isinstance(inference_session, dict) else -1
+    hand_interval = int(hand_request.get("inference_interval_frames", 1))
+    should_run_hand_inference = hand_interval <= 1 or last_hand_frame_index < 0 or current_frame_index <= last_hand_frame_index or (current_frame_index - last_hand_frame_index) >= hand_interval
 
     fixture_error = sampled.get("fixture_inference_error")
     if isinstance(fixture_error, dict):
@@ -2864,9 +2921,16 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], trac
                 raw_tracking_frame["tracking_state"] = "idle"
                 notes.append("Fixture sample did not supply pose landmarks; tracking remains idle.")
             raw_tracking_frame = _finalize_pose_frame(raw_tracking_frame, pose_request, inference_session)
-        raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime)
+        if should_run_hand_inference:
+            raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime, inference_ran=True, carried_forward=False, source_frame_index=current_frame_index)
+            raw_tracking_frame = _finalize_hand_frame(raw_tracking_frame, inference_session)
+        else:
+            raw_tracking_frame = _skip_hand_inference(raw_tracking_frame, tracking, runtime, inference_session)
+            notes.append(f"Skipped hand inference on frame {current_frame_index} because tracking.hands.inference_interval_frames={hand_interval}; carrying forward the last hand sample when available.")
         hand_meta = raw_tracking_frame.get("vendor_hand_tracking", {})
-        if hand_meta.get("available"):
+        if hand_meta.get("available") and bool(hand_meta.get("carried_forward", False)):
+            notes.append(f"Fixture carried forward {int(hand_meta.get('count', 0))} prior hand sample(s) from frame {int(hand_meta.get('source_frame_index', -1))} because tracking.hands.inference_interval_frames={hand_interval}.")
+        elif hand_meta.get("available"):
             notes.append(f"Fixture surfaced {int(hand_meta.get('count', 0))} raw hand sample(s) in {hand_meta.get('landmark_mode', _HAND_LANDMARK_MODE_DEFAULT)} mode.")
         elif isinstance(hand_meta.get("error_info"), dict):
             notes.append(str(hand_meta.get("error_info", {}).get("message", "Hand inference unavailable")))
@@ -2926,34 +2990,41 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], trac
         raw_tracking_frame = _skip_pose_inference(raw_tracking_frame, pose_request, inference_session)
         notes.append(f"Skipped pose inference on frame {current_frame_index} because tracking.pose.inference_interval_frames={pose_interval}; carrying forward the last pose sample when available.")
 
-    try:
-        if inference_session is not None:
-            cv2 = inference_session.get("cv2")
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB) if cv2 is not None else frame_bgr
-            hands_result = _infer_hands_from_session(frame_rgb, inference_session)
-        else:
-            hands_result = _infer_hands_with_mediapipe(runtime, tracking, frame_bgr)
-    except Exception as exc:
-        hands_result = {
-            "ok": False,
-            "error_info": {
-                "code": "mediapipe_inference_failed",
-                "message": f"MediaPipe hand inference failed for the sampled frame: {exc}",
-            },
-        }
-    if not bool(hands_result.get("ok", False)):
-        return {
-            "ok": False,
-            "error_info": hands_result.get("error_info", {
-                "code": "mediapipe_inference_failed",
-                "message": "MediaPipe hand inference failed for the sampled frame",
-            }),
-            "raw_tracking_frame": raw_tracking_frame,
-            "notes": notes,
-        }
-    raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime, hands_result)
+    if should_run_hand_inference:
+        try:
+            if inference_session is not None:
+                cv2 = inference_session.get("cv2")
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB) if cv2 is not None else frame_bgr
+                hands_result = _infer_hands_from_session(frame_rgb, inference_session)
+            else:
+                hands_result = _infer_hands_with_mediapipe(runtime, tracking, frame_bgr)
+        except Exception as exc:
+            hands_result = {
+                "ok": False,
+                "error_info": {
+                    "code": "mediapipe_inference_failed",
+                    "message": f"MediaPipe hand inference failed for the sampled frame: {exc}",
+                },
+            }
+        if not bool(hands_result.get("ok", False)):
+            return {
+                "ok": False,
+                "error_info": hands_result.get("error_info", {
+                    "code": "mediapipe_inference_failed",
+                    "message": "MediaPipe hand inference failed for the sampled frame",
+                }),
+                "raw_tracking_frame": raw_tracking_frame,
+                "notes": notes,
+            }
+        raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime, hands_result, inference_ran=True, carried_forward=False, source_frame_index=current_frame_index)
+        raw_tracking_frame = _finalize_hand_frame(raw_tracking_frame, inference_session)
+    else:
+        raw_tracking_frame = _skip_hand_inference(raw_tracking_frame, tracking, runtime, inference_session)
+        notes.append(f"Skipped hand inference on frame {current_frame_index} because tracking.hands.inference_interval_frames={hand_interval}; carrying forward the last hand sample when available.")
     hand_meta = raw_tracking_frame.get("vendor_hand_tracking", {})
-    if hand_meta.get("available"):
+    if hand_meta.get("available") and bool(hand_meta.get("carried_forward", False)):
+        notes.append(f"MediaPipe carried forward {int(hand_meta.get('count', 0))} prior hand sample(s) from frame {int(hand_meta.get('source_frame_index', -1))} because tracking.hands.inference_interval_frames={hand_interval}.")
+    elif hand_meta.get("available"):
         notes.append(f"MediaPipe hand inference produced {int(hand_meta.get('count', 0))} hand sample(s) via {hand_meta.get('inference_backend', 'mediapipe')} in {hand_meta.get('landmark_mode', _HAND_LANDMARK_MODE_DEFAULT)} mode.")
     elif isinstance(hand_meta.get("error_info"), dict):
         notes.append(str(hand_meta.get("error_info", {}).get("message", "Hand inference unavailable")))

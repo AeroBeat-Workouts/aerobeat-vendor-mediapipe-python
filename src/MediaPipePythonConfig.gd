@@ -22,7 +22,6 @@ const DEFAULT_PREVIEW_QUALITY := 75
 const DEFAULT_LIVE_CAMERA_FOURCC := "MJPG"
 const DEFAULT_HAND_LANDMARK_MODE := "lite"
 const DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES := 1
-const DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES := 1
 const DEFAULT_HAND_VALIDITY_MAX_STALE_MS := 80
 const DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS := 40
 
@@ -44,7 +43,6 @@ static func public_defaults() -> Dictionary:
 				"enabled": false,
 				"landmark_mode": DEFAULT_HAND_LANDMARK_MODE,
 				"inference_interval_frames": DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES,
-				"bbox_recompute_interval_frames": DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES,
 				"bbox": {
 					"enabled": true
 				},
@@ -83,7 +81,6 @@ static func vendor_defaults() -> Dictionary:
 				"enabled": false,
 				"landmark_mode": DEFAULT_HAND_LANDMARK_MODE,
 				"inference_interval_frames": DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES,
-				"bbox_recompute_interval_frames": DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES,
 				"bbox": {
 					"enabled": true
 				},
@@ -114,7 +111,6 @@ static func vendor_defaults() -> Dictionary:
 			"hand_tracking_enabled": false,
 			"hand_landmark_mode": DEFAULT_HAND_LANDMARK_MODE,
 			"hand_inference_interval_frames": DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES,
-			"hand_bbox_recompute_interval_frames": DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES,
 			"hand_bbox_enabled": true,
 			"hand_max_stale_ms": DEFAULT_HAND_VALIDITY_MAX_STALE_MS,
 			"hand_reacquire_stable_ms": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS,
@@ -224,10 +220,7 @@ static func make_vendor_runtime_config(public_config: Dictionary = {}) -> Dictio
 		incoming_runtime.get("hand_inference_interval_frames", hands.get("inference_interval_frames", DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES)),
 		DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES
 	)
-	runtime["hand_bbox_recompute_interval_frames"] = _normalize_positive_int(
-		incoming_runtime.get("hand_bbox_recompute_interval_frames", hands.get("bbox_recompute_interval_frames", DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES)),
-		DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES
-	)
+	runtime.erase("hand_bbox_recompute_interval_frames")
 	if incoming_runtime.has("hand_bbox_enabled"):
 		runtime["hand_bbox_enabled"] = bool(incoming_runtime.get("hand_bbox_enabled", true))
 	else:
@@ -245,7 +238,7 @@ static func make_vendor_runtime_config(public_config: Dictionary = {}) -> Dictio
 	hands["enabled"] = bool(runtime.get("hand_tracking_enabled", false))
 	hands["landmark_mode"] = String(runtime.get("hand_landmark_mode", DEFAULT_HAND_LANDMARK_MODE))
 	hands["inference_interval_frames"] = int(runtime.get("hand_inference_interval_frames", DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES))
-	hands["bbox_recompute_interval_frames"] = int(runtime.get("hand_bbox_recompute_interval_frames", DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES))
+	hands.erase("bbox_recompute_interval_frames")
 	hands["bbox"] = {"enabled": bool(runtime.get("hand_bbox_enabled", true))}
 	hands["validity"] = {
 		"max_stale_ms": int(runtime.get("hand_max_stale_ms", DEFAULT_HAND_VALIDITY_MAX_STALE_MS)),
@@ -398,10 +391,7 @@ static func _normalize_hands_config(value: Variant) -> Dictionary:
 		defaults.get("inference_interval_frames", DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES),
 		DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES
 	)
-	defaults["bbox_recompute_interval_frames"] = _normalize_positive_int(
-		defaults.get("bbox_recompute_interval_frames", DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES),
-		DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES
-	)
+	defaults.erase("bbox_recompute_interval_frames")
 	if not (defaults.get("bbox", {}) is Dictionary):
 		defaults["bbox"] = {"enabled": true}
 	defaults["bbox"]["enabled"] = bool(defaults.get("bbox", {}).get("enabled", true))

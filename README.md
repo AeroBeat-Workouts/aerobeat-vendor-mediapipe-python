@@ -80,7 +80,7 @@ Hand-tracking raw vendor payloads are now also exposed for the next tracker slic
 - `tracking.hands.landmark_mode: lite|full` controls both the emitted landmark subset and which landmarks the vendor uses to derive bbox geometry
   - `lite` uses a compact wrist/palm/fingertip subset for cheaper transport and intentionally produces a smaller bbox than `full`
   - `full` emits all 21 landmarks and derives bbox geometry from the full set
-- `raw_tracking_frame.vendor_hand_tracking` surfaces the requested cadence knobs and hand timing budget the tracker layer must honor upstream (`inference_interval_frames`, `bbox_recompute_interval_frames`, `max_stale_ms`, `reacquire_stable_ms`, backend/model availability, and API limits)
+- `raw_tracking_frame.vendor_hand_tracking` surfaces the requested cadence knobs and hand timing budget the tracker layer must honor upstream (`inference_interval_frames`, `max_stale_ms`, `reacquire_stable_ms`, backend/model availability, and API limits)
 
 Important API truth for later slices:
 
