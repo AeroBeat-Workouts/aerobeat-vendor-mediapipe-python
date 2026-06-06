@@ -478,8 +478,8 @@ def _hand_tracking_request(tracking: Dict[str, Any], runtime: Optional[Dict[str,
         "bbox_enabled": bool(runtime.get("hand_bbox_enabled", bbox.get("enabled", True))),
         "inference_interval_frames": max(1, int(runtime.get("hand_inference_interval_frames", hands.get("inference_interval_frames", 1)) or 1)),
         "bbox_recompute_interval_frames": max(1, int(runtime.get("hand_bbox_recompute_interval_frames", hands.get("bbox_recompute_interval_frames", 1)) or 1)),
-        "max_stale_frames": max(0, int(runtime.get("hand_max_stale_frames", validity.get("max_stale_frames", 2)) or 0)),
-        "reacquire_stable_frames": max(1, int(runtime.get("hand_reacquire_stable_frames", validity.get("reacquire_stable_frames", 2)) or 1)),
+        "max_stale_ms": max(0, int(runtime.get("hand_max_stale_ms", runtime.get("hand_max_stale_frames", validity.get("max_stale_ms", validity.get("max_stale_frames", 80)))) or 0)),
+        "reacquire_stable_ms": max(0, int(runtime.get("hand_reacquire_stable_ms", runtime.get("hand_reacquire_stable_frames", validity.get("reacquire_stable_ms", validity.get("reacquire_stable_frames", 40)))) or 0)),
     }
 
 
@@ -489,7 +489,7 @@ def _hand_tracking_constraints(request: Dict[str, Any], backend: str, hand_avail
         f"Hand landmark mode '{mode}' derives bbox geometry from the same emitted landmark subset, so lite mode intentionally under-bounds compared with full mode.",
         "MediaPipe does not expose stable per-hand track IDs in this slice; higher layers must not assume handedness labels remain bound across frames.",
         "Preview mirroring is a presentation transform only; raw hand coordinates stay camera-native and must be mirrored consistently upstream alongside pose.",
-        f"This vendor slice surfaces requested hand cadence only (inference every {int(request.get('inference_interval_frames', 1))} frame(s), bbox recompute every {int(request.get('bbox_recompute_interval_frames', 1))} frame(s)); actual stale/reacquire semantics remain an upstream responsibility.",
+        f"This vendor slice surfaces requested hand cadence and timing budget only (inference every {int(request.get('inference_interval_frames', 1))} frame(s), bbox recompute every {int(request.get('bbox_recompute_interval_frames', 1))} frame(s), max stale {int(request.get('max_stale_ms', 0))}ms, reacquire stable {int(request.get('reacquire_stable_ms', 0))}ms); actual stale/reacquire semantics remain an upstream responsibility.",
     ]
     if backend == "mediapipe_tasks_hand_landmarker":
         constraints.append("MediaPipe tasks hand inference runs in IMAGE mode here, so each frame is an independent detection with no vendor-side interpolation or per-hand timestamps.")

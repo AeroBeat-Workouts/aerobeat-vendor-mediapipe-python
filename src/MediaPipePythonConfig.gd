@@ -23,8 +23,8 @@ const DEFAULT_LIVE_CAMERA_FOURCC := "MJPG"
 const DEFAULT_HAND_LANDMARK_MODE := "lite"
 const DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES := 1
 const DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES := 1
-const DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES := 2
-const DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES := 2
+const DEFAULT_HAND_VALIDITY_MAX_STALE_MS := 80
+const DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS := 40
 
 static func public_defaults() -> Dictionary:
 	return {
@@ -49,8 +49,8 @@ static func public_defaults() -> Dictionary:
 					"enabled": true
 				},
 				"validity": {
-					"max_stale_frames": DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES,
-					"reacquire_stable_frames": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES
+					"max_stale_ms": DEFAULT_HAND_VALIDITY_MAX_STALE_MS,
+					"reacquire_stable_ms": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS
 				}
 			}
 		},
@@ -88,8 +88,8 @@ static func vendor_defaults() -> Dictionary:
 					"enabled": true
 				},
 				"validity": {
-					"max_stale_frames": DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES,
-					"reacquire_stable_frames": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES
+					"max_stale_ms": DEFAULT_HAND_VALIDITY_MAX_STALE_MS,
+					"reacquire_stable_ms": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS
 				}
 			}
 		},
@@ -116,8 +116,8 @@ static func vendor_defaults() -> Dictionary:
 			"hand_inference_interval_frames": DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES,
 			"hand_bbox_recompute_interval_frames": DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES,
 			"hand_bbox_enabled": true,
-			"hand_max_stale_frames": DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES,
-			"hand_reacquire_stable_frames": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES,
+			"hand_max_stale_ms": DEFAULT_HAND_VALIDITY_MAX_STALE_MS,
+			"hand_reacquire_stable_ms": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS,
 			"boot_timeout_ms": DEFAULT_BOOT_TIMEOUT_MS,
 			"shutdown_timeout_ms": DEFAULT_SHUTDOWN_TIMEOUT_MS,
 			"health_poll_interval_ms": DEFAULT_HEALTH_POLL_INTERVAL_MS,
@@ -232,22 +232,24 @@ static func make_vendor_runtime_config(public_config: Dictionary = {}) -> Dictio
 		runtime["hand_bbox_enabled"] = bool(incoming_runtime.get("hand_bbox_enabled", true))
 	else:
 		runtime["hand_bbox_enabled"] = bool(hands.get("bbox", {}).get("enabled", true))
-	runtime["hand_max_stale_frames"] = _normalize_nonnegative_int(
-		incoming_runtime.get("hand_max_stale_frames", hands.get("validity", {}).get("max_stale_frames", DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES)),
-		DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES
+	runtime["hand_max_stale_ms"] = _normalize_nonnegative_int(
+		incoming_runtime.get("hand_max_stale_ms", incoming_runtime.get("hand_max_stale_frames", hands.get("validity", {}).get("max_stale_ms", hands.get("validity", {}).get("max_stale_frames", DEFAULT_HAND_VALIDITY_MAX_STALE_MS)))),
+		DEFAULT_HAND_VALIDITY_MAX_STALE_MS
 	)
-	runtime["hand_reacquire_stable_frames"] = _normalize_positive_int(
-		incoming_runtime.get("hand_reacquire_stable_frames", hands.get("validity", {}).get("reacquire_stable_frames", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES)),
-		DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES
+	runtime["hand_reacquire_stable_ms"] = _normalize_nonnegative_int(
+		incoming_runtime.get("hand_reacquire_stable_ms", incoming_runtime.get("hand_reacquire_stable_frames", hands.get("validity", {}).get("reacquire_stable_ms", hands.get("validity", {}).get("reacquire_stable_frames", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS)))),
+		DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS
 	)
+	runtime.erase("hand_max_stale_frames")
+	runtime.erase("hand_reacquire_stable_frames")
 	hands["enabled"] = bool(runtime.get("hand_tracking_enabled", false))
 	hands["landmark_mode"] = String(runtime.get("hand_landmark_mode", DEFAULT_HAND_LANDMARK_MODE))
 	hands["inference_interval_frames"] = int(runtime.get("hand_inference_interval_frames", DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES))
 	hands["bbox_recompute_interval_frames"] = int(runtime.get("hand_bbox_recompute_interval_frames", DEFAULT_HAND_BBOX_RECOMPUTE_INTERVAL_FRAMES))
 	hands["bbox"] = {"enabled": bool(runtime.get("hand_bbox_enabled", true))}
 	hands["validity"] = {
-		"max_stale_frames": int(runtime.get("hand_max_stale_frames", DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES)),
-		"reacquire_stable_frames": int(runtime.get("hand_reacquire_stable_frames", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES))
+		"max_stale_ms": int(runtime.get("hand_max_stale_ms", DEFAULT_HAND_VALIDITY_MAX_STALE_MS)),
+		"reacquire_stable_ms": int(runtime.get("hand_reacquire_stable_ms", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS))
 	}
 	tracking["hands"] = hands
 	if incoming_runtime.has("no_filter"):
@@ -405,14 +407,16 @@ static func _normalize_hands_config(value: Variant) -> Dictionary:
 	defaults["bbox"]["enabled"] = bool(defaults.get("bbox", {}).get("enabled", true))
 	if not (defaults.get("validity", {}) is Dictionary):
 		defaults["validity"] = {}
-	defaults["validity"]["max_stale_frames"] = _normalize_nonnegative_int(
-		defaults.get("validity", {}).get("max_stale_frames", DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES),
-		DEFAULT_HAND_VALIDITY_MAX_STALE_FRAMES
+	defaults["validity"]["max_stale_ms"] = _normalize_nonnegative_int(
+		defaults.get("validity", {}).get("max_stale_ms", defaults.get("validity", {}).get("max_stale_frames", DEFAULT_HAND_VALIDITY_MAX_STALE_MS)),
+		DEFAULT_HAND_VALIDITY_MAX_STALE_MS
 	)
-	defaults["validity"]["reacquire_stable_frames"] = _normalize_positive_int(
-		defaults.get("validity", {}).get("reacquire_stable_frames", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES),
-		DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_FRAMES
+	defaults["validity"]["reacquire_stable_ms"] = _normalize_nonnegative_int(
+		defaults.get("validity", {}).get("reacquire_stable_ms", defaults.get("validity", {}).get("reacquire_stable_frames", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS)),
+		DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS
 	)
+	defaults["validity"].erase("max_stale_frames")
+	defaults["validity"].erase("reacquire_stable_frames")
 	return defaults
 
 static func _deep_merge(base: Dictionary, incoming: Dictionary) -> void:

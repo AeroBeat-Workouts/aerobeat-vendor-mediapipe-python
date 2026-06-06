@@ -452,6 +452,36 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertAlmostEqual(frame["hands"][0]["bbox"]["area"], 0.25, places=6)
             self.assertEqual(_FakeHandLandmarker.last_options.base_options.model_asset_path, str(hand_model_path))
 
+    def test_apply_hand_tracking_emits_ms_timing_contract(self):
+        runtime = {
+            "working_directory": tempfile.gettempdir(),
+            "hand_tracking_enabled": True,
+            "hand_max_stale_ms": 80,
+            "hand_reacquire_stable_ms": 40,
+        }
+        tracking = {
+            "hands": {
+                "enabled": True,
+                "landmark_mode": "lite",
+                "bbox": {"enabled": True},
+                "validity": {
+                    "max_stale_ms": 80,
+                    "reacquire_stable_ms": 40,
+                },
+            }
+        }
+        frame = probe._apply_hand_tracking({"timestamp_ms": 1}, tracking, runtime, {
+            "ok": True,
+            "hands": [],
+            "available": False,
+            "inference_backend": "fixture",
+            "constraints": [],
+        })
+        self.assertEqual(frame["vendor_hand_tracking"]["max_stale_ms"], 80)
+        self.assertEqual(frame["vendor_hand_tracking"]["reacquire_stable_ms"], 40)
+        self.assertNotIn("max_stale_frames", frame["vendor_hand_tracking"])
+        self.assertNotIn("reacquire_stable_frames", frame["vendor_hand_tracking"])
+
     def test_fixture_hands_are_normalized_with_full_landmark_mode(self):
         runtime = {"working_directory": tempfile.gettempdir()}
         tracking = {"hands": {"enabled": True, "landmark_mode": "full", "bbox": {"enabled": True}}}

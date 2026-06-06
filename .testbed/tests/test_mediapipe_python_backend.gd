@@ -121,8 +121,8 @@ func test_vendor_runtime_config_translation_keeps_public_shape_and_vendor_overri
 				"bbox_recompute_interval_frames": 3,
 				"bbox": {"enabled": true},
 				"validity": {
-					"max_stale_frames": 4,
-					"reacquire_stable_frames": 5
+					"max_stale_ms": 80,
+					"reacquire_stable_ms": 40
 				}
 			}
 		},
@@ -148,8 +148,12 @@ func test_vendor_runtime_config_translation_keeps_public_shape_and_vendor_overri
 	assert_eq(String(vendor_config["tracking"]["hands"].get("landmark_mode", "")), "full")
 	assert_eq(int(vendor_config["runtime"].get("hand_inference_interval_frames", 0)), 2)
 	assert_eq(int(vendor_config["runtime"].get("hand_bbox_recompute_interval_frames", 0)), 3)
-	assert_eq(int(vendor_config["runtime"].get("hand_max_stale_frames", 0)), 4)
-	assert_eq(int(vendor_config["runtime"].get("hand_reacquire_stable_frames", 0)), 5)
+	assert_eq(int(vendor_config["runtime"].get("hand_max_stale_ms", 0)), 80)
+	assert_eq(int(vendor_config["runtime"].get("hand_reacquire_stable_ms", 0)), 40)
+	assert_eq(int(vendor_config["tracking"].get("hands", {}).get("validity", {}).get("max_stale_ms", 0)), 80)
+	assert_eq(int(vendor_config["tracking"].get("hands", {}).get("validity", {}).get("reacquire_stable_ms", 0)), 40)
+	assert_false(vendor_config["runtime"].has("hand_max_stale_frames"))
+	assert_false(vendor_config["runtime"].has("hand_reacquire_stable_frames"))
 	assert_true(bool(vendor_config["runtime"].get("hand_bbox_enabled", false)))
 	assert_true(bool(vendor_config["runtime"].get("filter_enabled", false)))
 	assert_false(bool(vendor_config["runtime"].get("no_filter", true)))
