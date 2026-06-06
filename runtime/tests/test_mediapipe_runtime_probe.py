@@ -513,6 +513,72 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertGreater(hand["bbox"]["area"], 0.0)
         self.assertEqual(result["raw_tracking_frame"]["vendor_hand_tracking"]["count"], 1)
 
+    def test_pose_enabled_false_omits_pose_landmarks_but_surfaces_disabled_state(self):
+        runtime = {"working_directory": tempfile.gettempdir()}
+        tracking = {"pose": {"enabled": False}, "hands": {"enabled": False}}
+        sampled = {
+            "fixture_used": True,
+            "raw_tracking_frame": {
+                "timestamp_ms": 1,
+                "frame_index": 0,
+                "source_kind": "live_camera",
+                "source_id": "/dev/video0",
+                "tracking_state": "idle",
+                "landmarks": [{"id": 0, "x": 0.25, "y": 0.50, "z": -0.1, "visibility": 0.9}],
+            },
+            "notes": [],
+        }
+
+        result = probe._infer_pose_landmarks(sampled, runtime, tracking=tracking, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
+        self.assertTrue(result["ok"])
+        frame = result["raw_tracking_frame"]
+        self.assertEqual(frame["tracking_state"], "disabled")
+        self.assertNotIn("landmarks", frame)
+        self.assertEqual(frame["vendor_pose_tracking"]["enabled"], False)
+        self.assertEqual(frame["vendor_pose_tracking"]["inference_ran"], False)
+
+    def test_pose_inference_interval_frames_carries_forward_last_pose_sample(self):
+        runtime = {"working_directory": tempfile.gettempdir()}
+        tracking = {"pose": {"enabled": True, "inference_interval_frames": 2}, "hands": {"enabled": False}}
+        inference_session = {}
+        first = probe._infer_pose_landmarks({
+            "fixture_used": True,
+            "raw_tracking_frame": {
+                "timestamp_ms": 1,
+                "frame_index": 0,
+                "source_kind": "live_camera",
+                "source_id": "/dev/video0",
+                "tracking_state": "idle",
+                "landmarks": [{"id": 0, "x": 0.25, "y": 0.50, "z": -0.1, "visibility": 0.9}],
+            },
+            "notes": [],
+        }, runtime, tracking=tracking, inference_session=inference_session, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
+        self.assertTrue(first["ok"])
+        first_frame = first["raw_tracking_frame"]
+        self.assertEqual(first_frame["vendor_pose_tracking"]["inference_ran"], True)
+        self.assertEqual(first_frame["vendor_pose_tracking"]["carried_forward"], False)
+
+        second = probe._infer_pose_landmarks({
+            "fixture_used": True,
+            "raw_tracking_frame": {
+                "timestamp_ms": 41,
+                "frame_index": 1,
+                "source_kind": "live_camera",
+                "source_id": "/dev/video0",
+                "tracking_state": "idle",
+                "landmarks": [{"id": 0, "x": 0.75, "y": 0.20, "z": -0.5, "visibility": 0.7}],
+            },
+            "notes": [],
+        }, runtime, tracking=tracking, inference_session=inference_session, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
+        self.assertTrue(second["ok"])
+        second_frame = second["raw_tracking_frame"]
+        self.assertEqual(second_frame["frame_index"], 1)
+        self.assertEqual(second_frame["tracking_state"], "tracked")
+        self.assertEqual(second_frame["landmarks"], first_frame["landmarks"])
+        self.assertEqual(second_frame["vendor_pose_tracking"]["inference_ran"], False)
+        self.assertEqual(second_frame["vendor_pose_tracking"]["carried_forward"], True)
+        self.assertEqual(second_frame["vendor_pose_tracking"]["source_frame_index"], 0)
+
     def test_hand_landmarks_from_source_tolerates_none_numeric_fields(self):
         landmarks = probe._hand_landmarks_from_source([
             types.SimpleNamespace(x=None, y=0.25, z=None, visibility=None),

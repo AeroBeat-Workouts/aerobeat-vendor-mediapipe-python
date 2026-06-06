@@ -467,6 +467,16 @@ def _normalize_hand_landmark_mode(tracking: Dict[str, Any], runtime: Optional[Di
     return "full" if candidate == "full" else _HAND_LANDMARK_MODE_DEFAULT
 
 
+def _pose_tracking_request(tracking: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    runtime = runtime or {}
+    pose = tracking.get("pose", {}) if isinstance(tracking.get("pose", {}), dict) else {}
+    return {
+        "enabled": bool(runtime.get("pose_enabled", pose.get("enabled", True))),
+        "inference_interval_frames": max(1, int(runtime.get("pose_inference_interval_frames", pose.get("inference_interval_frames", 1)) or 1)),
+        "smoothing_style": str(runtime.get("pose_smoothing_style", pose.get("smoothing_style", "lite_filtered"))) or "lite_filtered",
+    }
+
+
 def _hand_tracking_request(tracking: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     runtime = runtime or {}
     hands = tracking.get("hands", {}) if isinstance(tracking.get("hands", {}), dict) else {}
@@ -2748,11 +2758,84 @@ def _apply_hand_tracking(raw_tracking_frame: Dict[str, Any], tracking: Dict[str,
     return frame
 
 
+def _current_pose_frame_index(raw_tracking_frame: Dict[str, Any]) -> int:
+    try:
+        return max(0, int(raw_tracking_frame.get("frame_index", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+
+def _pose_frame_with_current_sample(prior_pose_frame: Dict[str, Any], current_sample_frame: Dict[str, Any], request: Dict[str, Any], inference_ran: bool, carried_forward: bool) -> Dict[str, Any]:
+    carried = prior_pose_frame.copy()
+    for key in ("timestamp_ms", "frame_index", "source_kind", "source_id", "preview_transform"):
+        if key in current_sample_frame:
+            carried[key] = current_sample_frame.get(key)
+    carried["vendor_pose_tracking"] = {
+        **request,
+        "inference_ran": inference_ran,
+        "carried_forward": carried_forward,
+        "source_frame_index": _current_pose_frame_index(prior_pose_frame),
+    }
+    return carried
+
+
+
+def _skip_pose_inference(raw_tracking_frame: Dict[str, Any], pose_request: Dict[str, Any], inference_session: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    prior_pose_frame = inference_session.get("last_pose_frame") if isinstance(inference_session, dict) else None
+    if isinstance(prior_pose_frame, dict) and prior_pose_frame:
+        return _pose_frame_with_current_sample(prior_pose_frame, raw_tracking_frame, pose_request, inference_ran=False, carried_forward=True)
+    idle_frame = raw_tracking_frame.copy()
+    idle_frame.pop("landmarks", None)
+    idle_frame["tracking_state"] = "idle"
+    idle_frame["vendor_pose_tracking"] = {
+        **pose_request,
+        "inference_ran": False,
+        "carried_forward": False,
+    }
+    return idle_frame
+
+
+
+def _finalize_pose_frame(raw_tracking_frame: Dict[str, Any], pose_request: Dict[str, Any], inference_session: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    raw_tracking_frame["vendor_pose_tracking"] = {
+        **pose_request,
+        "inference_ran": True,
+        "carried_forward": False,
+    }
+    if isinstance(inference_session, dict):
+        inference_session["last_pose_frame"] = raw_tracking_frame.copy()
+        inference_session["last_pose_frame_index"] = _current_pose_frame_index(raw_tracking_frame)
+    return raw_tracking_frame
+
+
+
 def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], tracking: Optional[Dict[str, Any]] = None, inference_session: Optional[Dict[str, Any]] = None, tracking_semantics: Optional[Dict[str, Any]] = None, filter_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     tracking = tracking or {}
     raw_tracking_frame = sampled.get("raw_tracking_frame", {}).copy()
     notes = list(sampled.get("notes", []))
     semantics = tracking_semantics or {"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}
+    pose_request = _pose_tracking_request(tracking, runtime)
+
+    if not bool(pose_request.get("enabled", True)):
+        raw_tracking_frame.pop("landmarks", None)
+        raw_tracking_frame["tracking_state"] = "disabled"
+        raw_tracking_frame["vendor_pose_tracking"] = {
+            **pose_request,
+            "inference_ran": False,
+            "carried_forward": False,
+        }
+        raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime)
+        return {
+            "ok": True,
+            "raw_tracking_frame": raw_tracking_frame,
+            "notes": notes + ["Pose production disabled by tracking.pose.enabled=false; pose landmarks were intentionally omitted."],
+        }
+
+    current_frame_index = _current_pose_frame_index(raw_tracking_frame)
+    last_pose_frame_index = int(inference_session.get("last_pose_frame_index", -1)) if isinstance(inference_session, dict) else -1
+    pose_interval = int(pose_request.get("inference_interval_frames", 1))
+    should_run_pose_inference = pose_interval <= 1 or last_pose_frame_index < 0 or current_frame_index <= last_pose_frame_index or (current_frame_index - last_pose_frame_index) >= pose_interval
 
     fixture_error = sampled.get("fixture_inference_error")
     if isinstance(fixture_error, dict):
@@ -2764,18 +2847,23 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], trac
         }
 
     if bool(sampled.get("fixture_used", False)):
-        landmarks = raw_tracking_frame.get("landmarks")
-        if isinstance(landmarks, list) and len(landmarks) > 0:
-            raw_tracking_frame["tracking_state"] = "tracked"
-            raw_tracking_frame = _apply_tracking_semantics(raw_tracking_frame, semantics, filter_state)
-            semantics_meta = raw_tracking_frame.get("vendor_tracking_semantics", {})
-            notes.append(
-                f"Applied vendor tracking semantics to fixture landmarks: quality={semantics_meta.get('quality', 'optimized')}, filter_enabled={semantics_meta.get('filter_enabled', True)}, kept {semantics_meta.get('landmark_count_after', 0)} of {semantics_meta.get('landmark_count_before', 0)} landmark(s)."
-            )
+        if not should_run_pose_inference:
+            raw_tracking_frame = _skip_pose_inference(raw_tracking_frame, pose_request, inference_session)
+            notes.append(f"Skipped pose inference on frame {current_frame_index} because tracking.pose.inference_interval_frames={pose_interval}; carrying forward the last pose sample when available.")
         else:
-            raw_tracking_frame.pop("landmarks", None)
-            raw_tracking_frame["tracking_state"] = "idle"
-            notes.append("Fixture sample did not supply pose landmarks; tracking remains idle.")
+            landmarks = raw_tracking_frame.get("landmarks")
+            if isinstance(landmarks, list) and len(landmarks) > 0:
+                raw_tracking_frame["tracking_state"] = "tracked"
+                raw_tracking_frame = _apply_tracking_semantics(raw_tracking_frame, semantics, filter_state)
+                semantics_meta = raw_tracking_frame.get("vendor_tracking_semantics", {})
+                notes.append(
+                    f"Applied vendor tracking semantics to fixture landmarks: quality={semantics_meta.get('quality', 'optimized')}, filter_enabled={semantics_meta.get('filter_enabled', True)}, kept {semantics_meta.get('landmark_count_after', 0)} of {semantics_meta.get('landmark_count_before', 0)} landmark(s)."
+                )
+            else:
+                raw_tracking_frame.pop("landmarks", None)
+                raw_tracking_frame["tracking_state"] = "idle"
+                notes.append("Fixture sample did not supply pose landmarks; tracking remains idle.")
+            raw_tracking_frame = _finalize_pose_frame(raw_tracking_frame, pose_request, inference_session)
         raw_tracking_frame = _apply_hand_tracking(raw_tracking_frame, tracking, runtime)
         hand_meta = raw_tracking_frame.get("vendor_hand_tracking", {})
         if hand_meta.get("available"):
@@ -2800,37 +2888,43 @@ def _infer_pose_landmarks(sampled: Dict[str, Any], runtime: Dict[str, Any], trac
             "notes": notes,
         }
 
-    inferred = _infer_pose_landmarks_from_session(frame_bgr, inference_session) if inference_session is not None else _infer_pose_landmarks_with_mediapipe(runtime, frame_bgr)
-    if not bool(inferred.get("ok", False)):
-        return {
-            "ok": False,
-            "error_info": inferred.get("error_info", {
-                "code": "mediapipe_inference_failed",
-                "message": "MediaPipe pose inference failed for the sampled frame",
-            }),
-            "raw_tracking_frame": raw_tracking_frame,
-            "notes": notes,
-        }
+    inferred = None
+    if should_run_pose_inference:
+        inferred = _infer_pose_landmarks_from_session(frame_bgr, inference_session) if inference_session is not None else _infer_pose_landmarks_with_mediapipe(runtime, frame_bgr)
+        if not bool(inferred.get("ok", False)):
+            return {
+                "ok": False,
+                "error_info": inferred.get("error_info", {
+                    "code": "mediapipe_inference_failed",
+                    "message": "MediaPipe pose inference failed for the sampled frame",
+                }),
+                "raw_tracking_frame": raw_tracking_frame,
+                "notes": notes,
+            }
 
-    landmarks = inferred.get("landmarks", [])
-    if isinstance(landmarks, list) and landmarks:
-        raw_tracking_frame["tracking_state"] = "tracked"
-        raw_tracking_frame["landmarks"] = landmarks
-        raw_tracking_frame = _apply_tracking_semantics(raw_tracking_frame, semantics, filter_state)
-        semantics_meta = raw_tracking_frame.get("vendor_tracking_semantics", {})
-        notes.append(f"MediaPipe pose inference produced {len(landmarks)} landmark(s) from the sampled frame via {inferred.get('inference_backend', 'mediapipe')}.")
-        notes.append(
-            f"Applied vendor tracking semantics: quality={semantics_meta.get('quality', 'optimized')}, filter_enabled={semantics_meta.get('filter_enabled', True)}, kept {semantics_meta.get('landmark_count_after', 0)} of {semantics_meta.get('landmark_count_before', 0)} landmark(s)."
-        )
+        landmarks = inferred.get("landmarks", [])
+        if isinstance(landmarks, list) and landmarks:
+            raw_tracking_frame["tracking_state"] = "tracked"
+            raw_tracking_frame["landmarks"] = landmarks
+            raw_tracking_frame = _apply_tracking_semantics(raw_tracking_frame, semantics, filter_state)
+            semantics_meta = raw_tracking_frame.get("vendor_tracking_semantics", {})
+            notes.append(f"MediaPipe pose inference produced {len(landmarks)} landmark(s) from the sampled frame via {inferred.get('inference_backend', 'mediapipe')}.")
+            notes.append(
+                f"Applied vendor tracking semantics: quality={semantics_meta.get('quality', 'optimized')}, filter_enabled={semantics_meta.get('filter_enabled', True)}, kept {semantics_meta.get('landmark_count_after', 0)} of {semantics_meta.get('landmark_count_before', 0)} landmark(s)."
+            )
+        else:
+            raw_tracking_frame.pop("landmarks", None)
+            raw_tracking_frame["tracking_state"] = "idle"
+            if filter_state is not None:
+                filter_state.clear()
+            notes.append(f"MediaPipe pose inference via {inferred.get('inference_backend', 'mediapipe')} found no landmarks in the sampled frame; tracking remains idle.")
+
+        if inferred.get("model_asset_path"):
+            notes.append(f"MediaPipe tasks pose landmarker used model asset '{inferred['model_asset_path']}'.")
+        raw_tracking_frame = _finalize_pose_frame(raw_tracking_frame, pose_request, inference_session)
     else:
-        raw_tracking_frame.pop("landmarks", None)
-        raw_tracking_frame["tracking_state"] = "idle"
-        if filter_state is not None:
-            filter_state.clear()
-        notes.append(f"MediaPipe pose inference via {inferred.get('inference_backend', 'mediapipe')} found no landmarks in the sampled frame; tracking remains idle.")
-
-    if inferred.get("model_asset_path"):
-        notes.append(f"MediaPipe tasks pose landmarker used model asset '{inferred['model_asset_path']}'.")
+        raw_tracking_frame = _skip_pose_inference(raw_tracking_frame, pose_request, inference_session)
+        notes.append(f"Skipped pose inference on frame {current_frame_index} because tracking.pose.inference_interval_frames={pose_interval}; carrying forward the last pose sample when available.")
 
     try:
         if inference_session is not None:
