@@ -999,6 +999,103 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertEqual(snapshot["playback_status"]["state"], "ended")
             self.assertFalse(any(prop == _FakeReplayCv2.CAP_PROP_POS_MSEC for prop, _value in _FakeReplayCv2.LAST_CAPTURE.set_calls))
 
+    def test_run_continuous_video_file_session_uses_capture_source_timestamp_for_raw_replay_frame(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "fixture.mp4"
+            video_path.write_bytes(b"fixture-video")
+            session_dir = Path(temp_dir) / "session"
+            request = {
+                "operation": "startup",
+                "runtime": {
+                    "working_directory": temp_dir,
+                    "tracking_max_fps": 60,
+                    "state_update_max_fps": 60,
+                },
+                "source": {"kind": "video_file", "path": str(video_path), "loop": False},
+                "preview": {"enabled": False},
+            }
+            _FakeReplayCv2.FRAMES = [types.SimpleNamespace(shape=(360, 640, 3))]
+            _FakeReplayCv2.FPS = 2.0
+            _FakeReplayCv2.LAST_CAPTURE = None
+            snapshots = []
+
+            def _fake_infer(sampled, _runtime, **_kwargs):
+                return {
+                    "ok": True,
+                    "notes": ["opencv replay frame"],
+                    "raw_tracking_frame": dict(sampled.get("raw_tracking_frame", {})),
+                }
+
+            def _capture_snapshot(path, payload):
+                snapshots.append(payload)
+                probe._write_json_atomic(probe._session_snapshot_path(path), payload)
+
+            with mock.patch.dict("sys.modules", {"cv2": _FakeReplayCv2}, clear=False):
+                with mock.patch.object(probe, "_create_inference_session", return_value={"ok": True}):
+                    with mock.patch.object(probe, "_close_inference_session", return_value=None):
+                        with mock.patch.object(probe, "_infer_pose_landmarks", side_effect=_fake_infer):
+                            with mock.patch.object(probe, "_write_session_snapshot", side_effect=_capture_snapshot):
+                                with mock.patch.object(probe.time, "sleep", return_value=None):
+                                    exit_code = probe._run_continuous_session(request, str(session_dir))
+
+            self.assertEqual(exit_code, 0)
+            tracking_snapshots = [payload for payload in snapshots if payload.get("health", {}).get("tracking_active")]
+            self.assertGreaterEqual(len(tracking_snapshots), 1)
+            self.assertEqual(tracking_snapshots[0]["raw_tracking_frame"]["timestamp_ms"], 500)
+            self.assertEqual(tracking_snapshots[0]["playback_status"]["current_time_sec"], 0.5)
+
+    def test_run_continuous_video_file_session_uses_replay_source_time_for_state_write_cadence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "fixture.mp4"
+            video_path.write_bytes(b"fixture-video")
+            session_dir = Path(temp_dir) / "session"
+            request = {
+                "operation": "startup",
+                "runtime": {
+                    "working_directory": temp_dir,
+                    "tracking_max_fps": 120,
+                    "state_update_max_fps": 30,
+                },
+                "source": {"kind": "video_file", "path": str(video_path), "loop": False},
+                "preview": {"enabled": False},
+            }
+            _FakeReplayCv2.FRAMES = [
+                types.SimpleNamespace(shape=(360, 640, 3)),
+                types.SimpleNamespace(shape=(360, 640, 3)),
+                types.SimpleNamespace(shape=(360, 640, 3)),
+            ]
+            _FakeReplayCv2.FPS = 30.0
+            _FakeReplayCv2.LAST_CAPTURE = None
+            snapshots = []
+
+            def _fake_infer(sampled, _runtime, **_kwargs):
+                return {
+                    "ok": True,
+                    "notes": ["opencv replay frame"],
+                    "raw_tracking_frame": dict(sampled.get("raw_tracking_frame", {})),
+                }
+
+            def _capture_snapshot(path, payload):
+                snapshots.append(payload)
+                probe._write_json_atomic(probe._session_snapshot_path(path), payload)
+
+            with mock.patch.dict("sys.modules", {"cv2": _FakeReplayCv2}, clear=False):
+                with mock.patch.object(probe, "_create_inference_session", return_value={"ok": True}):
+                    with mock.patch.object(probe, "_close_inference_session", return_value=None):
+                        with mock.patch.object(probe, "_infer_pose_landmarks", side_effect=_fake_infer):
+                            with mock.patch.object(probe, "_write_session_snapshot", side_effect=_capture_snapshot):
+                                with mock.patch.object(probe.time, "monotonic", return_value=0.0):
+                                    with mock.patch.object(probe.time, "sleep", return_value=None):
+                                        exit_code = probe._run_continuous_session(request, str(session_dir))
+
+            self.assertEqual(exit_code, 0)
+            tracking_iterations = [
+                payload["health"]["loop_iteration"]
+                for payload in snapshots
+                if payload.get("health", {}).get("tracking_active")
+            ]
+            self.assertEqual(tracking_iterations, [0, 1, 2])
+
     def test_preview_descriptor_uses_reduced_runtime_defaults_when_no_overrides_are_provided(self):
         descriptor = probe._preview_descriptor({}, {})
         self.assertTrue(descriptor["enabled"])

@@ -1578,6 +1578,43 @@ def _rewind_replay_capture(capture: Any, cv2: Any, replay_start_time_sec: float)
     return bool(rewound)
 
 
+def _replay_source_timestamp_ms(capture: Any, cv2: Any, replay_start_time_sec: float, fallback_sample_index: int, fallback_fps: float) -> int:
+    try:
+        capture_timestamp_ms = float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+    except Exception:
+        capture_timestamp_ms = 0.0
+    if capture_timestamp_ms > 0.0:
+        return max(0, int(round(capture_timestamp_ms)))
+    frame_interval_ms = 0.0
+    if fallback_fps > 0.0:
+        frame_interval_ms = 1000.0 / fallback_fps
+    fallback_timestamp_ms = (max(replay_start_time_sec, 0.0) * 1000.0) + (max(0, fallback_sample_index + 1) * frame_interval_ms)
+    return max(0, int(round(fallback_timestamp_ms)))
+
+
+def _replay_interval_elapsed(current_timestamp_ms: int, last_timestamp_ms: Optional[int], interval_seconds: float) -> bool:
+    if last_timestamp_ms is None or interval_seconds <= 0.0:
+        return True
+    required_delta_ms = interval_seconds * 1000.0
+    return (float(current_timestamp_ms) - float(last_timestamp_ms)) >= max(required_delta_ms - 0.5, 0.0)
+
+
+def _sleep_to_match_replay_timestamp(
+    source_timestamp_ms: int,
+    anchor_source_timestamp_ms: Optional[int],
+    anchor_started_at: Optional[float],
+) -> Tuple[float, int, float]:
+    now = time.monotonic()
+    if anchor_source_timestamp_ms is None or anchor_started_at is None or source_timestamp_ms < anchor_source_timestamp_ms:
+        return (now, source_timestamp_ms, 0.0)
+    target_monotonic = anchor_started_at + max(0.0, float(source_timestamp_ms - anchor_source_timestamp_ms) / 1000.0)
+    sleep_seconds = max(0.0, target_monotonic - now)
+    if sleep_seconds > 0.0:
+        time.sleep(sleep_seconds)
+        now = time.monotonic()
+    return (anchor_started_at, anchor_source_timestamp_ms, sleep_seconds)
+
+
 def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     _arm_owner_orphan_protection()
     os.makedirs(session_dir, exist_ok=True)
@@ -1603,8 +1640,11 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     loop_enabled = bool(source.get("loop", False))
     fixture_frame_index = 0
     duration_sec = 0.0
-    last_state_write_at: Optional[float] = None
-    last_preview_write_at: Optional[float] = None
+    replay_fps = 0.0
+    replay_anchor_started_at: Optional[float] = None
+    replay_anchor_source_timestamp_ms: Optional[int] = None
+    last_state_source_timestamp_ms: Optional[int] = None
+    last_preview_source_timestamp_ms: Optional[int] = None
     last_preview_descriptor = _preview_descriptor(preview, runtime)
 
     capture = None
@@ -1635,6 +1675,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
             _write_session_snapshot(session_dir, snapshot)
             return 1
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        replay_fps = fps
         frame_count = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
         if fps > 0.0 and frame_count > 0.0:
             duration_sec = frame_count / fps
@@ -1745,11 +1786,12 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                     return 1
                 height = int(shape[0])
                 width = int(shape[1])
+                source_timestamp_ms = _replay_source_timestamp_ms(capture, cv2, replay_start_time_sec, sample_index, replay_fps)
                 sampled = {
                     "ok": True,
                     "frame_bgr": frame,
-                    "raw_tracking_frame": _raw_tracking_frame_base("video_file", video_path, width, height, _now_ms()),
-                    "notes": [f"Captured replay frame {sample_index} from '{video_path}'."],
+                    "raw_tracking_frame": _raw_tracking_frame_base("video_file", video_path, width, height, source_timestamp_ms),
+                    "notes": [f"Captured replay frame {sample_index} from '{video_path}' at source timestamp {source_timestamp_ms}ms."],
                 }
 
             if not bool(sampled.get("ok", False)):
@@ -1813,21 +1855,26 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 "frame_bgr": sampled.get("frame_bgr"),
             }
 
-            now = time.monotonic()
-            should_write_state = last_state_write_at is None or state_interval <= 0.0 or (now - last_state_write_at) >= state_interval
-            include_preview = bool(preview_config.get("enabled", True)) and should_write_state and (last_preview_write_at is None or preview_interval <= 0.0 or (now - last_preview_write_at) >= preview_interval)
+            current_source_timestamp_ms = int(raw_tracking_frame.get("timestamp_ms", 0) or 0)
+            replay_anchor_started_at, replay_anchor_source_timestamp_ms, _ = _sleep_to_match_replay_timestamp(
+                current_source_timestamp_ms,
+                replay_anchor_source_timestamp_ms,
+                replay_anchor_started_at,
+            )
+            should_write_state = _replay_interval_elapsed(current_source_timestamp_ms, last_state_source_timestamp_ms, state_interval)
+            include_preview = bool(preview_config.get("enabled", True)) and should_write_state and _replay_interval_elapsed(current_source_timestamp_ms, last_preview_source_timestamp_ms, preview_interval)
             if should_write_state:
                 snapshot = _continuous_success_snapshot(request, sampled_snapshot, sample_index, loop_started_ms, session_dir, include_preview_frame=include_preview, existing_preview_descriptor=last_preview_descriptor)
                 last_preview_descriptor = snapshot.get("preview_descriptor", last_preview_descriptor).copy()
                 _write_session_snapshot(session_dir, snapshot)
-                last_state_write_at = now
+                last_state_source_timestamp_ms = current_source_timestamp_ms
                 if include_preview:
-                    last_preview_write_at = now
+                    last_preview_source_timestamp_ms = current_source_timestamp_ms
 
             sample_index += 1
             if use_fixture_sequence:
                 fixture_frame_index += 1
-            if tracking_interval > 0.0:
+            if tracking_interval > 0.0 and replay_fps <= 0.0:
                 sleep_seconds = max(0.0, tracking_interval - (time.monotonic() - iteration_started_at))
                 if sleep_seconds > 0.0:
                     time.sleep(sleep_seconds)
