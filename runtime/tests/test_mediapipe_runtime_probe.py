@@ -1027,13 +1027,15 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
                 descriptor = probe._write_preview_frame(temp_dir, frame, preview)
 
             preview_path = Path(temp_dir) / "preview_frame.jpg"
-            self.assertEqual(descriptor["image_path"], str(preview_path))
+            preview_path_str = str(preview_path)
+            self.assertEqual(descriptor["image_path"], preview_path_str)
             self.assertTrue(preview_path.exists())
             self.assertEqual(preview_path.read_bytes(), b"fake-jpeg")
             self.assertEqual(len(_FakePreviewWriteCv2.write_calls), 1)
             temp_write_path, temp_write_params = _FakePreviewWriteCv2.write_calls[0]
-            self.assertNotEqual(temp_write_path, str(preview_path))
-            self.assertTrue(temp_write_path.startswith(f"{preview_path}."), temp_write_path)
+            self.assertNotEqual(temp_write_path, preview_path_str)
+            self.assertTrue(temp_write_path.startswith(f"{preview_path_str[:-4]}."), temp_write_path)
+            self.assertTrue(temp_write_path.endswith(".jpg"), temp_write_path)
             self.assertFalse(Path(temp_write_path).exists())
             self.assertEqual(temp_write_params, [int(_FakePreviewWriteCv2.IMWRITE_JPEG_QUALITY), 77])
 

@@ -3300,7 +3300,11 @@ def _write_image_atomic(cv2: Any, path: str, image: Any, params: Optional[List[i
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
-    temp_path = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
+    stem, extension = os.path.splitext(path)
+    if extension:
+        temp_path = f"{stem}.{os.getpid()}.{time.time_ns()}{extension}"
+    else:
+        temp_path = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
     try:
         wrote = cv2.imwrite(temp_path, image, params) if params else cv2.imwrite(temp_path, image)
         if not wrote:
