@@ -25,6 +25,15 @@ func after_each() -> void:
 			dir.list_dir_end()
 		DirAccess.remove_absolute(_fixture_root)
 
+func test_vendor_runtime_defaults_use_reduced_continuous_cadence() -> void:
+	var defaults := MediaPipePythonConfig.vendor_defaults()
+	assert_eq(int(defaults.get("tracking", {}).get("max_fps", -1)), 15)
+	assert_eq(int(defaults.get("preview", {}).get("max_fps", -1)), 10)
+	assert_eq(int(defaults.get("runtime", {}).get("tracking_max_fps", -1)), 15)
+	assert_eq(int(defaults.get("runtime", {}).get("state_update_max_fps", -1)), 15)
+	assert_eq(int(defaults.get("runtime", {}).get("preview_max_fps", -1)), 10)
+	assert_eq(int(defaults.get("runtime", {}).get("live_camera_fps", -1)), 15)
+
 func test_startup_emits_real_minimal_landmark_payload_when_sampled_landmarks_exist() -> void:
 	var bridge = MediaPipePythonRuntimeBridge.new()
 	var snapshot := bridge.startup(_make_runtime_config())

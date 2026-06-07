@@ -999,6 +999,14 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertEqual(snapshot["playback_status"]["state"], "ended")
             self.assertFalse(any(prop == _FakeReplayCv2.CAP_PROP_POS_MSEC for prop, _value in _FakeReplayCv2.LAST_CAPTURE.set_calls))
 
+    def test_preview_descriptor_uses_reduced_runtime_defaults_when_no_overrides_are_provided(self):
+        descriptor = probe._preview_descriptor({}, {})
+        self.assertTrue(descriptor["enabled"])
+        self.assertEqual(descriptor["max_fps"], 10)
+        self.assertEqual(descriptor["width"], 960)
+        self.assertEqual(descriptor["height"], 540)
+        self.assertEqual(descriptor["quality"], 75)
+
     def test_preview_descriptor_uses_runtime_preview_knobs(self):
         descriptor = probe._preview_descriptor(
             {"enabled": True, "surface_mode": "attach", "flip_horizontal": False},
