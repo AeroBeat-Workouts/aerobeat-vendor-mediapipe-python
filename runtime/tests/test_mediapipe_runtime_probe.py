@@ -25,6 +25,21 @@ class _FakeCv2:
         return frame_bgr
 
 
+class _FakePreviewWriteCv2(_FakeCv2):
+    IMWRITE_JPEG_QUALITY = 1
+    write_calls = []
+
+    @classmethod
+    def reset(cls):
+        cls.write_calls = []
+
+    @classmethod
+    def imwrite(cls, path, _frame, params=None):
+        cls.write_calls.append((path, list(params or [])))
+        Path(path).write_bytes(b"fake-jpeg")
+        return True
+
+
 class _FakeNegotiatedCapture:
     def __init__(self, profile):
         self.profile = profile
@@ -1001,6 +1016,26 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertEqual(descriptor["height"], 360)
         self.assertEqual(descriptor["quality"], 80)
         self.assertFalse(descriptor["flip_horizontal"])
+
+    def test_write_preview_frame_writes_temp_file_then_atomically_replaces_final_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _FakePreviewWriteCv2.reset()
+            frame = types.SimpleNamespace(shape=(240, 320, 3))
+            preview = {"enabled": True, "width": 320, "height": 240, "quality": 77}
+
+            with mock.patch.dict("sys.modules", {"cv2": _FakePreviewWriteCv2}, clear=False):
+                descriptor = probe._write_preview_frame(temp_dir, frame, preview)
+
+            preview_path = Path(temp_dir) / "preview_frame.jpg"
+            self.assertEqual(descriptor["image_path"], str(preview_path))
+            self.assertTrue(preview_path.exists())
+            self.assertEqual(preview_path.read_bytes(), b"fake-jpeg")
+            self.assertEqual(len(_FakePreviewWriteCv2.write_calls), 1)
+            temp_write_path, temp_write_params = _FakePreviewWriteCv2.write_calls[0]
+            self.assertNotEqual(temp_write_path, str(preview_path))
+            self.assertTrue(temp_write_path.startswith(f"{preview_path}."), temp_write_path)
+            self.assertFalse(Path(temp_write_path).exists())
+            self.assertEqual(temp_write_params, [int(_FakePreviewWriteCv2.IMWRITE_JPEG_QUALITY), 77])
 
     def test_video_file_session_tracking_sleep_uses_tracking_max_fps_instead_of_health_poll_interval(self):
         with tempfile.TemporaryDirectory() as temp_dir:

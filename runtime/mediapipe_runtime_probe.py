@@ -3296,6 +3296,26 @@ def _session_preview_frame_path(session_dir: str) -> str:
     return os.path.join(session_dir, _SESSION_PREVIEW_FRAME_FILENAME)
 
 
+def _write_image_atomic(cv2: Any, path: str, image: Any, params: Optional[List[int]] = None) -> bool:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temp_path = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        wrote = cv2.imwrite(temp_path, image, params) if params else cv2.imwrite(temp_path, image)
+        if not wrote:
+            return False
+        os.replace(temp_path, path)
+        temp_path = ""
+        return True
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 def _resize_preview_frame(cv2: Any, frame_bgr: Any, max_width: int, max_height: int) -> Any:
     shape = getattr(frame_bgr, "shape", None)
     if shape is None or len(shape) < 2:
@@ -3329,7 +3349,7 @@ def _write_preview_frame(session_dir: str, frame_bgr: Any, preview: Dict[str, An
     params: List[int] = []
     if hasattr(cv2, "IMWRITE_JPEG_QUALITY"):
         params = [int(cv2.IMWRITE_JPEG_QUALITY), preview_config["quality"]]
-    wrote = cv2.imwrite(preview_path, prepared_frame, params) if params else cv2.imwrite(preview_path, prepared_frame)
+    wrote = _write_image_atomic(cv2, preview_path, prepared_frame, params)
     if not wrote:
         return {}
     output_shape = getattr(prepared_frame, "shape", None)
