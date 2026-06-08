@@ -156,6 +156,32 @@ class _FakeReplayCv2(_FakeCv2):
         return cls.LAST_CAPTURE
 
 
+class _FakeReplayCaptureZeroPosAfterRewind(_FakeReplayCapture):
+    def __init__(self, frames, fps=30.0):
+        super().__init__(frames, fps=fps)
+        self._force_zero_pos = False
+
+    def read(self):
+        ok, frame = super().read()
+        if ok and self._force_zero_pos:
+            self.last_pos_msec = 0.0
+        return (ok, frame)
+
+    def set(self, prop, value):
+        changed = super().set(prop, value)
+        if changed and prop == _FakeReplayCv2.CAP_PROP_POS_MSEC and float(value) <= 0.0:
+            self._force_zero_pos = True
+        return changed
+
+
+class _FakeReplayCv2ZeroPosAfterRewind(_FakeReplayCv2):
+    @classmethod
+    def VideoCapture(cls, _source, backend=None):
+        del backend
+        cls.LAST_CAPTURE = _FakeReplayCaptureZeroPosAfterRewind(cls.FRAMES, fps=cls.FPS)
+        return cls.LAST_CAPTURE
+
+
 class _FakeLandmark:
     def __init__(self, x, y, z, visibility):
         self.x = x
@@ -954,6 +980,68 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertIsNotNone(_FakeReplayCv2.LAST_CAPTURE)
             self.assertTrue(any(prop == _FakeReplayCv2.CAP_PROP_POS_MSEC and value == 1000.0 for prop, value in _FakeReplayCv2.LAST_CAPTURE.set_calls))
             self.assertTrue(any(prop == _FakeReplayCv2.CAP_PROP_POS_MSEC and value == 0.0 for prop, value in _FakeReplayCv2.LAST_CAPTURE.set_calls))
+            tracking_times = [
+                payload["playback_status"]["current_time_sec"]
+                for payload in snapshots
+                if payload.get("health", {}).get("tracking_active")
+            ]
+            self.assertEqual(tracking_times[:3], [1.5, 0.5, 1.0])
+
+    def test_run_continuous_video_file_session_resume_start_uses_loop_origin_when_capture_pos_resets_to_zero_after_rewind(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "fixture.mp4"
+            video_path.write_bytes(b"fixture-video")
+            session_dir = Path(temp_dir) / "session"
+            request = {
+                "operation": "startup",
+                "runtime": {
+                    "working_directory": temp_dir,
+                    "tracking_max_fps": 0,
+                    "state_update_max_fps": 0,
+                },
+                "source": {
+                    "kind": "video_file",
+                    "path": str(video_path),
+                    "loop": True,
+                    "start_time_sec": 1.0,
+                    "loop_start_time_sec": 0.0,
+                },
+                "preview": {"enabled": False},
+            }
+            snapshots = []
+            _FakeReplayCv2ZeroPosAfterRewind.FRAMES = [
+                types.SimpleNamespace(shape=(360, 640, 3)),
+                types.SimpleNamespace(shape=(360, 640, 3)),
+                types.SimpleNamespace(shape=(360, 640, 3)),
+            ]
+            _FakeReplayCv2ZeroPosAfterRewind.FPS = 2.0
+            _FakeReplayCv2ZeroPosAfterRewind.LAST_CAPTURE = None
+
+            def _fake_infer(sampled, _runtime, **_kwargs):
+                return {
+                    "ok": True,
+                    "notes": ["opencv replay frame"],
+                    "raw_tracking_frame": dict(sampled.get("raw_tracking_frame", {})),
+                }
+
+            def _capture_snapshot(path, payload):
+                snapshots.append(payload)
+                if payload.get("health", {}).get("tracking_active") and payload.get("health", {}).get("loop_iteration", -1) >= 2:
+                    Path(probe._session_stop_path(path)).write_text("stop")
+                probe._write_json_atomic(probe._session_snapshot_path(path), payload)
+
+            with mock.patch.dict("sys.modules", {"cv2": _FakeReplayCv2ZeroPosAfterRewind}, clear=False):
+                with mock.patch.object(probe, "_create_inference_session", return_value={"ok": True}):
+                    with mock.patch.object(probe, "_close_inference_session", return_value=None):
+                        with mock.patch.object(probe, "_infer_pose_landmarks", side_effect=_fake_infer):
+                            with mock.patch.object(probe, "_write_session_snapshot", side_effect=_capture_snapshot):
+                                with mock.patch.object(probe.time, "sleep", return_value=None):
+                                    exit_code = probe._run_continuous_session(request, str(session_dir))
+
+            self.assertEqual(exit_code, 0)
+            self.assertIsNotNone(_FakeReplayCv2ZeroPosAfterRewind.LAST_CAPTURE)
+            self.assertTrue(any(prop == _FakeReplayCv2.CAP_PROP_POS_MSEC and value == 1000.0 for prop, value in _FakeReplayCv2ZeroPosAfterRewind.LAST_CAPTURE.set_calls))
+            self.assertTrue(any(prop == _FakeReplayCv2.CAP_PROP_POS_MSEC and value == 0.0 for prop, value in _FakeReplayCv2ZeroPosAfterRewind.LAST_CAPTURE.set_calls))
             tracking_times = [
                 payload["playback_status"]["current_time_sec"]
                 for payload in snapshots

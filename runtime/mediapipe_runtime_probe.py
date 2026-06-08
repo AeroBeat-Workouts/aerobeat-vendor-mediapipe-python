@@ -1595,6 +1595,8 @@ def _replay_source_timestamp_ms(capture: Any, cv2: Any, replay_start_time_sec: f
 def _replay_interval_elapsed(current_timestamp_ms: int, last_timestamp_ms: Optional[int], interval_seconds: float) -> bool:
     if last_timestamp_ms is None or interval_seconds <= 0.0:
         return True
+    if current_timestamp_ms < last_timestamp_ms:
+        return True
     required_delta_ms = interval_seconds * 1000.0
     return (float(current_timestamp_ms) - float(last_timestamp_ms)) >= max(required_delta_ms - 0.5, 0.0)
 
@@ -1641,6 +1643,8 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     fixture_frame_index = 0
     duration_sec = 0.0
     replay_fps = 0.0
+    current_replay_origin_sec = replay_start_time_sec
+    replay_loop_frame_index = 0
     replay_anchor_started_at: Optional[float] = None
     replay_anchor_source_timestamp_ms: Optional[int] = None
     last_state_source_timestamp_ms: Optional[int] = None
@@ -1757,6 +1761,12 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 if not bool(sampled.get("ok", False)) and sampled.get("error_info", {}).get("code") == "video_file_eof":
                     if loop_enabled:
                         fixture_frame_index = 0
+                        current_replay_origin_sec = replay_loop_start_time_sec
+                        replay_loop_frame_index = 0
+                        replay_anchor_started_at = None
+                        replay_anchor_source_timestamp_ms = None
+                        last_state_source_timestamp_ms = None
+                        last_preview_source_timestamp_ms = None
                         continue
                     eof_snapshot = _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index)
                     eof_snapshot["preview_descriptor"] = last_preview_descriptor.copy()
@@ -1767,6 +1777,12 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     if loop_enabled and _rewind_replay_capture(capture, cv2, replay_loop_start_time_sec):
+                        current_replay_origin_sec = replay_loop_start_time_sec
+                        replay_loop_frame_index = 0
+                        replay_anchor_started_at = None
+                        replay_anchor_source_timestamp_ms = None
+                        last_state_source_timestamp_ms = None
+                        last_preview_source_timestamp_ms = None
                         continue
                     eof_snapshot = _replay_eof_snapshot(request, video_path, loop_started_ms, sample_index)
                     eof_snapshot["preview_descriptor"] = last_preview_descriptor.copy()
@@ -1786,7 +1802,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                     return 1
                 height = int(shape[0])
                 width = int(shape[1])
-                source_timestamp_ms = _replay_source_timestamp_ms(capture, cv2, replay_start_time_sec, sample_index, replay_fps)
+                source_timestamp_ms = _replay_source_timestamp_ms(capture, cv2, current_replay_origin_sec, replay_loop_frame_index, replay_fps)
                 sampled = {
                     "ok": True,
                     "frame_bgr": frame,
@@ -1840,9 +1856,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 health["notes"].append(f"Returning {len(landmarks)} raw replay pose landmark(s).")
             else:
                 health["notes"].append("Returning no raw landmarks because the replay frame did not produce a pose.")
-            current_time_sec = replay_start_time_sec
-            if capture is not None and cv2 is not None:
-                current_time_sec = max(0.0, float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0)
+            current_time_sec = max(0.0, float(source_timestamp_ms) / 1000.0)
 
             sampled_snapshot = {
                 "ok": True,
@@ -1872,6 +1886,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                     last_preview_source_timestamp_ms = current_source_timestamp_ms
 
             sample_index += 1
+            replay_loop_frame_index += 1
             if use_fixture_sequence:
                 fixture_frame_index += 1
             if tracking_interval > 0.0 and replay_fps <= 0.0:
