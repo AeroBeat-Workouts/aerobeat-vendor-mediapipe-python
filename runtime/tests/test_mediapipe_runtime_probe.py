@@ -1184,6 +1184,76 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             ]
             self.assertEqual(tracking_iterations, [0, 1, 2])
 
+
+    def test_run_continuous_video_file_session_keeps_preview_writes_decoupled_from_state_cadence(self):
+        class _FakeReplayPreviewCv2(_FakeReplayCv2):
+            IMWRITE_JPEG_QUALITY = 1
+            write_calls = []
+
+            @classmethod
+            def reset(cls):
+                cls.write_calls = []
+
+            @classmethod
+            def imwrite(cls, path, _frame, params=None):
+                cls.write_calls.append((path, list(params or [])))
+                Path(path).write_bytes(b"fake-jpeg")
+                return True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "fixture.mp4"
+            video_path.write_bytes(b"fixture-video")
+            session_dir = Path(temp_dir) / "session"
+            request = {
+                "operation": "startup",
+                "runtime": {
+                    "working_directory": temp_dir,
+                    "tracking_max_fps": 120,
+                    "state_update_max_fps": 1,
+                    "preview_max_fps": 30,
+                },
+                "source": {"kind": "video_file", "path": str(video_path), "loop": False},
+                "preview": {"enabled": True},
+            }
+            _FakeReplayPreviewCv2.FRAMES = [
+                types.SimpleNamespace(shape=(360, 640, 3)),
+                types.SimpleNamespace(shape=(360, 640, 3)),
+                types.SimpleNamespace(shape=(360, 640, 3)),
+                types.SimpleNamespace(shape=(360, 640, 3)),
+            ]
+            _FakeReplayPreviewCv2.FPS = 10.0
+            _FakeReplayPreviewCv2.LAST_CAPTURE = None
+            _FakeReplayPreviewCv2.reset()
+            snapshots = []
+
+            def _fake_infer(sampled, _runtime, **_kwargs):
+                return {
+                    "ok": True,
+                    "notes": ["opencv replay frame"],
+                    "raw_tracking_frame": dict(sampled.get("raw_tracking_frame", {})),
+                }
+
+            def _capture_snapshot(path, payload):
+                snapshots.append(payload)
+                probe._write_json_atomic(probe._session_snapshot_path(path), payload)
+
+            with mock.patch.dict("sys.modules", {"cv2": _FakeReplayPreviewCv2}, clear=False):
+                with mock.patch.object(probe, "_create_inference_session", return_value={"ok": True}):
+                    with mock.patch.object(probe, "_close_inference_session", return_value=None):
+                        with mock.patch.object(probe, "_infer_pose_landmarks", side_effect=_fake_infer):
+                            with mock.patch.object(probe, "_write_session_snapshot", side_effect=_capture_snapshot):
+                                with mock.patch.object(probe.time, "sleep", return_value=None):
+                                    with mock.patch.object(probe.time, "time", side_effect=[1.000, 1.001, 1.002, 1.003, 1.004, 1.005]):
+                                        exit_code = probe._run_continuous_session(request, str(session_dir))
+
+            self.assertEqual(exit_code, 0)
+            tracking_snapshots = [payload for payload in snapshots if payload.get("health", {}).get("tracking_active")]
+            preview_revisions = [payload.get("preview_descriptor", {}).get("image_revision") for payload in tracking_snapshots]
+            self.assertEqual(len(preview_revisions), 4)
+            self.assertGreater(len(set(preview_revisions)), 1)
+            self.assertEqual([payload.get("raw_tracking_frame", {}).get("timestamp_ms") for payload in tracking_snapshots], [100, 100, 100, 100])
+            self.assertEqual(len(_FakeReplayPreviewCv2.write_calls), 4)
+
     def test_preview_descriptor_uses_reduced_runtime_defaults_when_no_overrides_are_provided(self):
         descriptor = probe._preview_descriptor({}, {})
         self.assertTrue(descriptor["enabled"])
@@ -1270,6 +1340,90 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(any(duration < 0.05 for duration in sleeps), sleeps)
             self.assertFalse(any(abs(duration - 0.25) < 0.001 for duration in sleeps), sleeps)
+
+
+    def test_run_continuous_live_session_keeps_preview_writes_decoupled_from_state_cadence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = Path(temp_dir) / "session"
+            stop_path = Path(probe._session_stop_path(str(session_dir)))
+            request = {
+                "operation": "startup",
+                "runtime": {
+                    "working_directory": temp_dir,
+                    "tracking_max_fps": 0,
+                    "state_update_max_fps": 1,
+                    "preview_max_fps": 30,
+                },
+                "source": {"kind": "live_camera", "camera_id": "/dev/video0"},
+                "preview": {"enabled": True},
+            }
+            selection = {
+                "ok": True,
+                "selected_camera_id": "/dev/video0",
+                "selected": {"available": True, "label": "Fake Camera"},
+                "cameras": [{"camera_id": "/dev/video0"}],
+                "health": {"notes": []},
+            }
+            capture_session = {
+                "ok": True,
+                "fixture_only": True,
+                "notes": ["Capture session opened."],
+                "capture_negotiation": {"selected": {"width": 640, "height": 480}},
+                "camera_options": {"reported_source": "fixture"},
+            }
+            snapshots = []
+            samples = [
+                {"ok": True, "frame_bgr": types.SimpleNamespace(shape=(360, 640, 3)), "raw_tracking_frame": {"timestamp_ms": 100, "landmarks": [], "source_kind": "live_camera", "camera_id": "/dev/video0"}, "camera_options": {"reported_source": "fixture"}},
+                {"ok": True, "frame_bgr": types.SimpleNamespace(shape=(360, 640, 3)), "raw_tracking_frame": {"timestamp_ms": 200, "landmarks": [], "source_kind": "live_camera", "camera_id": "/dev/video0"}, "camera_options": {"reported_source": "fixture"}},
+                {"ok": True, "frame_bgr": types.SimpleNamespace(shape=(360, 640, 3)), "raw_tracking_frame": {"timestamp_ms": 300, "landmarks": [], "source_kind": "live_camera", "camera_id": "/dev/video0"}, "camera_options": {"reported_source": "fixture"}},
+            ]
+            monotonic_values = iter([0.0, 0.0, 0.1, 0.1, 0.2, 0.2])
+            last_monotonic = 0.2
+
+            def _fake_monotonic():
+                nonlocal last_monotonic
+                try:
+                    last_monotonic = next(monotonic_values)
+                except StopIteration:
+                    pass
+                return last_monotonic
+
+            def _fake_capture(*_args, **_kwargs):
+                sample = samples.pop(0)
+                if not samples:
+                    stop_path.parent.mkdir(parents=True, exist_ok=True)
+                    stop_path.write_text("stop")
+                return sample
+
+            def _fake_infer(sampled, _runtime, **_kwargs):
+                return {
+                    "ok": True,
+                    "notes": ["live frame"],
+                    "raw_tracking_frame": dict(sampled.get("raw_tracking_frame", {})),
+                }
+
+            def _capture_snapshot(_session_dir, payload):
+                snapshots.append(payload)
+
+            with mock.patch.dict("sys.modules", {"cv2": _FakePreviewWriteCv2}, clear=False):
+                with mock.patch.object(probe, "_select_source", return_value=selection):
+                    with mock.patch.object(probe, "_open_live_camera_capture_session", return_value=capture_session):
+                        with mock.patch.object(probe, "_close_live_camera_capture_session", return_value=None):
+                            with mock.patch.object(probe, "_capture_live_camera_session_sample", side_effect=_fake_capture):
+                                with mock.patch.object(probe, "_infer_pose_landmarks", side_effect=_fake_infer):
+                                    with mock.patch.object(probe, "_enumerate_cameras", return_value=selection["cameras"]):
+                                        with mock.patch.object(probe, "_write_session_snapshot", side_effect=_capture_snapshot):
+                                            with mock.patch.object(probe.time, "monotonic", side_effect=_fake_monotonic):
+                                                with mock.patch.object(probe.time, "time", side_effect=[2.000, 2.001, 2.002, 2.003, 2.004]):
+                                                    exit_code = probe._run_continuous_session(request, str(session_dir))
+
+            self.assertEqual(exit_code, 0)
+            tracking_snapshots = [payload for payload in snapshots if payload.get("health", {}).get("tracking_active")]
+            preview_revisions = [payload.get("preview_descriptor", {}).get("image_revision") for payload in tracking_snapshots]
+            self.assertEqual(len(preview_revisions), 3)
+            self.assertGreater(len(set(preview_revisions)), 1)
+            self.assertEqual([payload.get("raw_tracking_frame", {}).get("timestamp_ms") for payload in tracking_snapshots], [100, 100, 100])
+            self.assertEqual(snapshots[-1]["health"]["status"], "idle")
 
     def test_sample_once_prefers_v4l2_mjpg_and_reports_negotiated_mode_truthfully(self):
         request = {

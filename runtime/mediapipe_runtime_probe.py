@@ -1650,6 +1650,7 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
     last_state_source_timestamp_ms: Optional[int] = None
     last_preview_source_timestamp_ms: Optional[int] = None
     last_preview_descriptor = _preview_descriptor(preview, runtime)
+    last_published_snapshot: Optional[Dict[str, Any]] = None
 
     capture = None
     cv2 = None
@@ -1856,7 +1857,8 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 health["notes"].append(f"Returning {len(landmarks)} raw replay pose landmark(s).")
             else:
                 health["notes"].append("Returning no raw landmarks because the replay frame did not produce a pose.")
-            current_time_sec = max(0.0, float(source_timestamp_ms) / 1000.0)
+            current_source_timestamp_ms = int(raw_tracking_frame.get("timestamp_ms", 0) or 0)
+            current_time_sec = max(0.0, float(current_source_timestamp_ms) / 1000.0)
 
             sampled_snapshot = {
                 "ok": True,
@@ -1869,21 +1871,27 @@ def _run_video_file_session(request: Dict[str, Any], session_dir: str) -> int:
                 "frame_bgr": sampled.get("frame_bgr"),
             }
 
-            current_source_timestamp_ms = int(raw_tracking_frame.get("timestamp_ms", 0) or 0)
             replay_anchor_started_at, replay_anchor_source_timestamp_ms, _ = _sleep_to_match_replay_timestamp(
                 current_source_timestamp_ms,
                 replay_anchor_source_timestamp_ms,
                 replay_anchor_started_at,
             )
             should_write_state = _replay_interval_elapsed(current_source_timestamp_ms, last_state_source_timestamp_ms, state_interval)
-            include_preview = bool(preview_config.get("enabled", True)) and should_write_state and _replay_interval_elapsed(current_source_timestamp_ms, last_preview_source_timestamp_ms, preview_interval)
+            include_preview = bool(preview_config.get("enabled", True)) and _replay_interval_elapsed(current_source_timestamp_ms, last_preview_source_timestamp_ms, preview_interval)
             if should_write_state:
                 snapshot = _continuous_success_snapshot(request, sampled_snapshot, sample_index, loop_started_ms, session_dir, include_preview_frame=include_preview, existing_preview_descriptor=last_preview_descriptor)
                 last_preview_descriptor = snapshot.get("preview_descriptor", last_preview_descriptor).copy()
                 _write_session_snapshot(session_dir, snapshot)
+                last_published_snapshot = snapshot.copy()
                 last_state_source_timestamp_ms = current_source_timestamp_ms
                 if include_preview:
                     last_preview_source_timestamp_ms = current_source_timestamp_ms
+            elif include_preview and last_published_snapshot is not None:
+                snapshot = _continuous_preview_only_snapshot(request, last_published_snapshot, sampled.get("frame_bgr"), session_dir)
+                last_preview_descriptor = snapshot.get("preview_descriptor", last_preview_descriptor).copy()
+                _write_session_snapshot(session_dir, snapshot)
+                last_published_snapshot = snapshot.copy()
+                last_preview_source_timestamp_ms = current_source_timestamp_ms
 
             sample_index += 1
             replay_loop_frame_index += 1
@@ -3532,6 +3540,15 @@ def _continuous_success_snapshot(request: Dict[str, Any], sampled: Dict[str, Any
     return snapshot
 
 
+def _continuous_preview_only_snapshot(request: Dict[str, Any], published_snapshot: Dict[str, Any], frame_bgr: Any, session_dir: str) -> Dict[str, Any]:
+    snapshot = published_snapshot.copy()
+    preview = request.get("preview", {}) if isinstance(request.get("preview", {}), dict) else {}
+    runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
+    snapshot["preview_descriptor"] = _with_preview_frame(session_dir, preview, frame_bgr, runtime)
+    snapshot["ok"] = True
+    return snapshot
+
+
 def _continuous_error_snapshot(request: Dict[str, Any], failure: Dict[str, Any], sample_index: int, loop_started_ms: int) -> Dict[str, Any]:
     runtime = request.get("runtime", {}) if isinstance(request.get("runtime", {}), dict) else {}
     health = _base_health("startup", runtime)
@@ -3582,6 +3599,7 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
     last_state_write_at: Optional[float] = None
     last_preview_write_at: Optional[float] = None
     last_preview_descriptor = _preview_descriptor(preview, runtime)
+    last_published_snapshot: Optional[Dict[str, Any]] = None
     _arm_owner_orphan_protection()
 
     selection = _select_source(request)
@@ -3720,14 +3738,21 @@ def _run_continuous_session(request: Dict[str, Any], session_dir: str) -> int:
 
             now = time.monotonic()
             should_write_state = last_state_write_at is None or state_interval <= 0.0 or (now - last_state_write_at) >= state_interval
-            include_preview = bool(preview_config.get("enabled", True)) and should_write_state and (last_preview_write_at is None or preview_interval <= 0.0 or (now - last_preview_write_at) >= preview_interval)
+            include_preview = bool(preview_config.get("enabled", True)) and (last_preview_write_at is None or preview_interval <= 0.0 or (now - last_preview_write_at) >= preview_interval)
             if should_write_state:
                 snapshot = _continuous_success_snapshot(request, sampled_snapshot, sample_index, loop_started_ms, session_dir, include_preview_frame=include_preview, existing_preview_descriptor=last_preview_descriptor)
                 last_preview_descriptor = snapshot.get("preview_descriptor", last_preview_descriptor).copy()
                 _write_session_snapshot(session_dir, snapshot)
+                last_published_snapshot = snapshot.copy()
                 last_state_write_at = now
                 if include_preview:
                     last_preview_write_at = now
+            elif include_preview and last_published_snapshot is not None:
+                snapshot = _continuous_preview_only_snapshot(request, last_published_snapshot, sampled.get("frame_bgr"), session_dir)
+                last_preview_descriptor = snapshot.get("preview_descriptor", last_preview_descriptor).copy()
+                _write_session_snapshot(session_dir, snapshot)
+                last_published_snapshot = snapshot.copy()
+                last_preview_write_at = now
 
             sample_index += 1
             if tracking_interval > 0.0:
