@@ -20,10 +20,6 @@ const DEFAULT_PREVIEW_WIDTH := 960
 const DEFAULT_PREVIEW_HEIGHT := 540
 const DEFAULT_PREVIEW_QUALITY := 75
 const DEFAULT_LIVE_CAMERA_FOURCC := "MJPG"
-const DEFAULT_HAND_LANDMARK_MODE := "lite"
-const DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES := 1
-const DEFAULT_HAND_VALIDITY_MAX_STALE_MS := 80
-const DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS := 40
 
 static func public_defaults() -> Dictionary:
 	return {
@@ -38,19 +34,7 @@ static func public_defaults() -> Dictionary:
 			"overlay_mode": DEFAULT_OVERLAY_MODE,
 			"gesture_eval_interval_frames": DEFAULT_GESTURE_EVAL_INTERVAL_FRAMES,
 			"min_visibility": DEFAULT_MIN_VISIBILITY,
-			"max_fps": DEFAULT_TRACKING_MAX_FPS,
-			"hands": {
-				"enabled": false,
-				"landmark_mode": DEFAULT_HAND_LANDMARK_MODE,
-				"inference_interval_frames": DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES,
-				"bbox": {
-					"enabled": true
-				},
-				"validity": {
-					"max_stale_ms": DEFAULT_HAND_VALIDITY_MAX_STALE_MS,
-					"reacquire_stable_ms": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS
-				}
-			}
+			"max_fps": DEFAULT_TRACKING_MAX_FPS
 		},
 		"preview": {
 			"enabled": true,
@@ -76,19 +60,7 @@ static func vendor_defaults() -> Dictionary:
 			"overlay_mode": DEFAULT_OVERLAY_MODE,
 			"gesture_eval_interval_frames": DEFAULT_GESTURE_EVAL_INTERVAL_FRAMES,
 			"min_visibility": DEFAULT_MIN_VISIBILITY,
-			"max_fps": DEFAULT_TRACKING_MAX_FPS,
-			"hands": {
-				"enabled": false,
-				"landmark_mode": DEFAULT_HAND_LANDMARK_MODE,
-				"inference_interval_frames": DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES,
-				"bbox": {
-					"enabled": true
-				},
-				"validity": {
-					"max_stale_ms": DEFAULT_HAND_VALIDITY_MAX_STALE_MS,
-					"reacquire_stable_ms": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS
-				}
-			}
+			"max_fps": DEFAULT_TRACKING_MAX_FPS
 		},
 		"preview": {
 			"enabled": true,
@@ -107,13 +79,6 @@ static func vendor_defaults() -> Dictionary:
 			"environment": {},
 			"model_complexity": DEFAULT_MODEL_COMPLEXITY,
 			"pose_landmarker_model_path": "",
-			"hand_landmarker_model_path": "",
-			"hand_tracking_enabled": false,
-			"hand_landmark_mode": DEFAULT_HAND_LANDMARK_MODE,
-			"hand_inference_interval_frames": DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES,
-			"hand_bbox_enabled": true,
-			"hand_max_stale_ms": DEFAULT_HAND_VALIDITY_MAX_STALE_MS,
-			"hand_reacquire_stable_ms": DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS,
 			"boot_timeout_ms": DEFAULT_BOOT_TIMEOUT_MS,
 			"shutdown_timeout_ms": DEFAULT_SHUTDOWN_TIMEOUT_MS,
 			"health_poll_interval_ms": DEFAULT_HEALTH_POLL_INTERVAL_MS,
@@ -142,7 +107,7 @@ static func normalize_public_config(config: Dictionary = {}) -> Dictionary:
 	_deep_merge(normalized, config)
 	normalized["backend"] = BACKEND_ID
 	var tracking: Dictionary = normalized.get("tracking", {})
-	var incoming_tracking: Dictionary = config["tracking"] if config.has("tracking") else {}
+	tracking.erase("hands")
 	tracking["quality"] = _normalize_tracking_quality(
 		tracking.get("quality", DEFAULT_TRACKING_QUALITY),
 		tracking.get("overlay_mode", DEFAULT_OVERLAY_MODE)
@@ -154,7 +119,6 @@ static func normalize_public_config(config: Dictionary = {}) -> Dictionary:
 		tracking.get("max_fps", DEFAULT_TRACKING_MAX_FPS),
 		DEFAULT_TRACKING_MAX_FPS
 	)
-	tracking["hands"] = _normalize_hands_config(incoming_tracking["hands"] if incoming_tracking.has("hands") else tracking.get("hands", {}))
 	normalized["tracking"] = tracking
 	var preview: Dictionary = normalized.get("preview", {})
 	preview["enabled"] = bool(preview.get("enabled", true))
@@ -197,8 +161,19 @@ static func make_vendor_runtime_config(public_config: Dictionary = {}) -> Dictio
 	var tracking: Dictionary = vendor_config.get("tracking", {})
 	var preview: Dictionary = vendor_config.get("preview", {})
 	var runtime: Dictionary = vendor_config.get("runtime", {})
-	var incoming_tracking: Dictionary = public_config["tracking"] if public_config.has("tracking") else {}
 	var incoming_runtime: Dictionary = public_config["runtime"] if public_config.has("runtime") else {}
+
+	tracking.erase("hands")
+	runtime.erase("hand_landmarker_model_path")
+	runtime.erase("hand_tracking_enabled")
+	runtime.erase("hand_landmark_mode")
+	runtime.erase("hand_inference_interval_frames")
+	runtime.erase("hand_bbox_enabled")
+	runtime.erase("hand_max_stale_ms")
+	runtime.erase("hand_reacquire_stable_ms")
+	runtime.erase("hand_max_stale_frames")
+	runtime.erase("hand_reacquire_stable_frames")
+	runtime.erase("hand_bbox_recompute_interval_frames")
 
 	runtime["model_complexity"] = _normalize_model_complexity(runtime.get("model_complexity", DEFAULT_MODEL_COMPLEXITY))
 	tracking["quality"] = _normalize_tracking_quality(
@@ -206,45 +181,6 @@ static func make_vendor_runtime_config(public_config: Dictionary = {}) -> Dictio
 		tracking.get("overlay_mode", DEFAULT_OVERLAY_MODE)
 	)
 	tracking["overlay_mode"] = _normalize_overlay_mode(tracking.get("overlay_mode", DEFAULT_OVERLAY_MODE))
-	tracking["hands"] = _normalize_hands_config(incoming_tracking["hands"] if incoming_tracking.has("hands") else tracking.get("hands", {}))
-	var hands: Dictionary = tracking.get("hands", {})
-	if incoming_runtime.has("hand_tracking_enabled"):
-		runtime["hand_tracking_enabled"] = bool(incoming_runtime.get("hand_tracking_enabled", false))
-	else:
-		runtime["hand_tracking_enabled"] = bool(hands.get("enabled", false))
-	if incoming_runtime.has("hand_landmark_mode"):
-		runtime["hand_landmark_mode"] = _normalize_hand_landmark_mode(incoming_runtime.get("hand_landmark_mode", DEFAULT_HAND_LANDMARK_MODE))
-	else:
-		runtime["hand_landmark_mode"] = _normalize_hand_landmark_mode(hands.get("landmark_mode", DEFAULT_HAND_LANDMARK_MODE))
-	runtime["hand_inference_interval_frames"] = _normalize_positive_int(
-		incoming_runtime.get("hand_inference_interval_frames", hands.get("inference_interval_frames", DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES)),
-		DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES
-	)
-	runtime.erase("hand_bbox_recompute_interval_frames")
-	if incoming_runtime.has("hand_bbox_enabled"):
-		runtime["hand_bbox_enabled"] = bool(incoming_runtime.get("hand_bbox_enabled", true))
-	else:
-		runtime["hand_bbox_enabled"] = bool(hands.get("bbox", {}).get("enabled", true))
-	runtime["hand_max_stale_ms"] = _normalize_nonnegative_int(
-		incoming_runtime.get("hand_max_stale_ms", incoming_runtime.get("hand_max_stale_frames", hands.get("validity", {}).get("max_stale_ms", hands.get("validity", {}).get("max_stale_frames", DEFAULT_HAND_VALIDITY_MAX_STALE_MS)))),
-		DEFAULT_HAND_VALIDITY_MAX_STALE_MS
-	)
-	runtime["hand_reacquire_stable_ms"] = _normalize_nonnegative_int(
-		incoming_runtime.get("hand_reacquire_stable_ms", incoming_runtime.get("hand_reacquire_stable_frames", hands.get("validity", {}).get("reacquire_stable_ms", hands.get("validity", {}).get("reacquire_stable_frames", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS)))),
-		DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS
-	)
-	runtime.erase("hand_max_stale_frames")
-	runtime.erase("hand_reacquire_stable_frames")
-	hands["enabled"] = bool(runtime.get("hand_tracking_enabled", false))
-	hands["landmark_mode"] = String(runtime.get("hand_landmark_mode", DEFAULT_HAND_LANDMARK_MODE))
-	hands["inference_interval_frames"] = int(runtime.get("hand_inference_interval_frames", DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES))
-	hands.erase("bbox_recompute_interval_frames")
-	hands["bbox"] = {"enabled": bool(runtime.get("hand_bbox_enabled", true))}
-	hands["validity"] = {
-		"max_stale_ms": int(runtime.get("hand_max_stale_ms", DEFAULT_HAND_VALIDITY_MAX_STALE_MS)),
-		"reacquire_stable_ms": int(runtime.get("hand_reacquire_stable_ms", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS))
-	}
-	tracking["hands"] = hands
 	if incoming_runtime.has("no_filter"):
 		runtime["filter_enabled"] = not bool(incoming_runtime.get("no_filter", false))
 	else:
@@ -369,45 +305,6 @@ static func _normalize_overlay_mode(value: Variant) -> String:
 			return "off"
 		_:
 			return DEFAULT_OVERLAY_MODE
-
-static func _normalize_hand_landmark_mode(value: Variant) -> String:
-	var normalized := str(value).strip_edges().to_lower()
-	match normalized:
-		"full":
-			return "full"
-		_:
-			return DEFAULT_HAND_LANDMARK_MODE
-
-static func _normalize_hands_config(value: Variant) -> Dictionary:
-	var defaults: Dictionary = {}
-	var default_tracking: Dictionary = public_defaults().get("tracking", {})
-	if typeof(default_tracking.get("hands", {})) == TYPE_DICTIONARY:
-		defaults = default_tracking.get("hands", {}).duplicate(true)
-	if typeof(value) == TYPE_DICTIONARY:
-		_deep_merge(defaults, value)
-	defaults["enabled"] = bool(defaults.get("enabled", false))
-	defaults["landmark_mode"] = _normalize_hand_landmark_mode(defaults.get("landmark_mode", DEFAULT_HAND_LANDMARK_MODE))
-	defaults["inference_interval_frames"] = _normalize_positive_int(
-		defaults.get("inference_interval_frames", DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES),
-		DEFAULT_HAND_INFERENCE_INTERVAL_FRAMES
-	)
-	defaults.erase("bbox_recompute_interval_frames")
-	if not (defaults.get("bbox", {}) is Dictionary):
-		defaults["bbox"] = {"enabled": true}
-	defaults["bbox"]["enabled"] = bool(defaults.get("bbox", {}).get("enabled", true))
-	if not (defaults.get("validity", {}) is Dictionary):
-		defaults["validity"] = {}
-	defaults["validity"]["max_stale_ms"] = _normalize_nonnegative_int(
-		defaults.get("validity", {}).get("max_stale_ms", defaults.get("validity", {}).get("max_stale_frames", DEFAULT_HAND_VALIDITY_MAX_STALE_MS)),
-		DEFAULT_HAND_VALIDITY_MAX_STALE_MS
-	)
-	defaults["validity"]["reacquire_stable_ms"] = _normalize_nonnegative_int(
-		defaults.get("validity", {}).get("reacquire_stable_ms", defaults.get("validity", {}).get("reacquire_stable_frames", DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS)),
-		DEFAULT_HAND_VALIDITY_REACQUIRE_STABLE_MS
-	)
-	defaults["validity"].erase("max_stale_frames")
-	defaults["validity"].erase("reacquire_stable_frames")
-	return defaults
 
 static func _deep_merge(base: Dictionary, incoming: Dictionary) -> void:
 	for key in incoming.keys():

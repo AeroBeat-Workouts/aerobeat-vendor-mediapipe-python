@@ -226,13 +226,6 @@ class _FakePoseLandmarkerOptions:
         self.num_poses = num_poses
 
 
-class _FakeHandLandmarkerOptions:
-    def __init__(self, base_options, running_mode, num_hands=2, **_kwargs):
-        self.base_options = base_options
-        self.running_mode = running_mode
-        self.num_hands = num_hands
-
-
 class _FakePoseLandmarker:
     last_options = None
 
@@ -258,106 +251,10 @@ class _FakePoseLandmarker:
         return cls(options)
 
 
-class _FakeLegacyClassification:
-    def __init__(self, label, score):
-        self.label = label
-        self.score = score
-
-
-class _FakeLegacyHands:
-    def __init__(self, static_image_mode=True, max_num_hands=2):
-        self.static_image_mode = static_image_mode
-        self.max_num_hands = max_num_hands
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def process(self, frame_rgb):
-        return types.SimpleNamespace(
-            multi_hand_landmarks=[
-                types.SimpleNamespace(landmark=[
-                    _FakeLandmark(0.10, 0.20, -0.01, 1.0),
-                    _FakeLandmark(0.20, 0.30, -0.02, 1.0),
-                    _FakeLandmark(0.30, 0.40, -0.03, 1.0),
-                    _FakeLandmark(0.40, 0.50, -0.04, 1.0),
-                    _FakeLandmark(0.50, 0.60, -0.05, 1.0),
-                    _FakeLandmark(0.15, 0.25, -0.06, 1.0),
-                    _FakeLandmark(0.25, 0.35, -0.07, 1.0),
-                    _FakeLandmark(0.35, 0.45, -0.08, 1.0),
-                    _FakeLandmark(0.45, 0.55, -0.09, 1.0),
-                    _FakeLandmark(0.55, 0.65, -0.10, 1.0),
-                    _FakeLandmark(0.12, 0.22, -0.11, 1.0),
-                    _FakeLandmark(0.22, 0.32, -0.12, 1.0),
-                    _FakeLandmark(0.32, 0.42, -0.13, 1.0),
-                    _FakeLandmark(0.42, 0.52, -0.14, 1.0),
-                    _FakeLandmark(0.52, 0.62, -0.15, 1.0),
-                    _FakeLandmark(0.18, 0.28, -0.16, 1.0),
-                    _FakeLandmark(0.28, 0.38, -0.17, 1.0),
-                    _FakeLandmark(0.38, 0.48, -0.18, 1.0),
-                    _FakeLandmark(0.48, 0.58, -0.19, 1.0),
-                    _FakeLandmark(0.58, 0.68, -0.20, 1.0),
-                    _FakeLandmark(0.60, 0.70, -0.21, 1.0),
-                ])
-            ],
-            multi_handedness=[types.SimpleNamespace(classification=[_FakeLegacyClassification("Left", 0.91)])],
-        )
-
-
-class _FakeHandLandmarker:
-    last_options = None
-
-    def __init__(self, options):
-        self.options = options
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def detect(self, image):
-        return types.SimpleNamespace(
-            hand_landmarks=[[
-                _FakeLandmark(0.10, 0.20, -0.01, 1.0),
-                _FakeLandmark(0.20, 0.30, -0.02, 1.0),
-                _FakeLandmark(0.30, 0.40, -0.03, 1.0),
-                _FakeLandmark(0.40, 0.50, -0.04, 1.0),
-                _FakeLandmark(0.50, 0.60, -0.05, 1.0),
-                _FakeLandmark(0.15, 0.25, -0.06, 1.0),
-                _FakeLandmark(0.25, 0.35, -0.07, 1.0),
-                _FakeLandmark(0.35, 0.45, -0.08, 1.0),
-                _FakeLandmark(0.45, 0.55, -0.09, 1.0),
-                _FakeLandmark(0.55, 0.65, -0.10, 1.0),
-                _FakeLandmark(0.12, 0.22, -0.11, 1.0),
-                _FakeLandmark(0.22, 0.32, -0.12, 1.0),
-                _FakeLandmark(0.32, 0.42, -0.13, 1.0),
-                _FakeLandmark(0.42, 0.52, -0.14, 1.0),
-                _FakeLandmark(0.52, 0.62, -0.15, 1.0),
-                _FakeLandmark(0.18, 0.28, -0.16, 1.0),
-                _FakeLandmark(0.28, 0.38, -0.17, 1.0),
-                _FakeLandmark(0.38, 0.48, -0.18, 1.0),
-                _FakeLandmark(0.48, 0.58, -0.19, 1.0),
-                _FakeLandmark(0.58, 0.68, -0.20, 1.0),
-                _FakeLandmark(0.60, 0.70, -0.21, 1.0),
-            ]],
-            handedness=[[types.SimpleNamespace(category_name="Right", score=0.87)]],
-        )
-
-    @classmethod
-    def create_from_options(cls, options):
-        cls.last_options = options
-        return cls(options)
-
-
 def _fake_tasks_mediapipe_module():
     vision_module = types.SimpleNamespace(
         PoseLandmarker=_FakePoseLandmarker,
         PoseLandmarkerOptions=_FakePoseLandmarkerOptions,
-        HandLandmarker=_FakeHandLandmarker,
-        HandLandmarkerOptions=_FakeHandLandmarkerOptions,
         RunningMode=types.SimpleNamespace(IMAGE="IMAGE"),
     )
     tasks_module = types.SimpleNamespace()
@@ -379,8 +276,7 @@ def _fake_tasks_mediapipe_module():
 
 def _fake_legacy_mediapipe_module():
     pose_namespace = types.SimpleNamespace(Pose=_FakeLegacyPose)
-    hands_namespace = types.SimpleNamespace(Hands=_FakeLegacyHands)
-    solutions_namespace = types.SimpleNamespace(pose=pose_namespace, hands=hands_namespace)
+    solutions_namespace = types.SimpleNamespace(pose=pose_namespace)
     mp_module = types.SimpleNamespace(solutions=solutions_namespace)
     return {"mediapipe": mp_module}
 
@@ -463,100 +359,12 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
             {"id": 1, "x": 0.6, "y": 0.4, "z": -0.2, "visibility": 0.8},
         ])
 
-    def test_tasks_hand_path_emits_lite_bbox_payload_when_model_is_available(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pose_model_path = Path(temp_dir) / "pose_landmarker_lite.task"
-            pose_model_path.write_bytes(b"pose-model")
-            hand_model_path = Path(temp_dir) / "hand_landmarker.task"
-            hand_model_path.write_bytes(b"hand-model")
-            runtime = {
-                "working_directory": temp_dir,
-                "pose_landmarker_model_path": str(pose_model_path),
-                "hand_landmarker_model_path": str(hand_model_path),
-            }
-            tracking = {"hands": {"enabled": True, "landmark_mode": "lite", "bbox": {"enabled": True}}}
-            with mock.patch.dict("sys.modules", {"cv2": _FakeCv2, **_fake_tasks_mediapipe_module()}, clear=False):
-                hands_result = probe._infer_hands_with_mediapipe(runtime, tracking, frame_bgr=[[0]])
-                frame = probe._apply_hand_tracking({"timestamp_ms": 1}, tracking, runtime, hands_result)
-            self.assertTrue(hands_result["ok"])
-            self.assertEqual(hands_result["inference_backend"], "mediapipe_tasks_hand_landmarker")
-            self.assertEqual(frame["vendor_hand_tracking"]["count"], 1)
-            self.assertEqual(frame["vendor_hand_tracking"]["landmark_mode"], "lite")
-            self.assertEqual(frame["hands"][0]["label"], "right")
-            self.assertEqual(frame["hands"][0]["landmark_count_before"], 21)
-            self.assertEqual(frame["hands"][0]["landmark_count_after"], 11)
-            self.assertEqual(frame["hands"][0]["bbox"]["landmark_mode"], "lite")
-            self.assertAlmostEqual(frame["hands"][0]["bbox"]["x"], 0.10, places=6)
-            self.assertAlmostEqual(frame["hands"][0]["bbox"]["y"], 0.20, places=6)
-            self.assertAlmostEqual(frame["hands"][0]["bbox"]["width"], 0.50, places=6)
-            self.assertAlmostEqual(frame["hands"][0]["bbox"]["height"], 0.50, places=6)
-            self.assertAlmostEqual(frame["hands"][0]["bbox"]["area"], 0.25, places=6)
-            self.assertEqual(_FakeHandLandmarker.last_options.base_options.model_asset_path, str(hand_model_path))
 
-    def test_apply_hand_tracking_emits_ms_timing_contract(self):
-        runtime = {
-            "working_directory": tempfile.gettempdir(),
-            "hand_tracking_enabled": True,
-            "hand_max_stale_ms": 80,
-            "hand_reacquire_stable_ms": 40,
-        }
-        tracking = {
-            "hands": {
-                "enabled": True,
-                "landmark_mode": "lite",
-                "bbox": {"enabled": True},
-                "validity": {
-                    "max_stale_ms": 80,
-                    "reacquire_stable_ms": 40,
-                },
-            }
-        }
-        frame = probe._apply_hand_tracking({"timestamp_ms": 1}, tracking, runtime, {
-            "ok": True,
-            "hands": [],
-            "available": False,
-            "inference_backend": "fixture",
-            "constraints": [],
-        })
-        self.assertEqual(frame["vendor_hand_tracking"]["max_stale_ms"], 80)
-        self.assertEqual(frame["vendor_hand_tracking"]["reacquire_stable_ms"], 40)
-        self.assertNotIn("max_stale_frames", frame["vendor_hand_tracking"])
-        self.assertNotIn("reacquire_stable_frames", frame["vendor_hand_tracking"])
 
-    def test_fixture_hands_are_normalized_with_full_landmark_mode(self):
-        runtime = {"working_directory": tempfile.gettempdir()}
-        tracking = {"hands": {"enabled": True, "landmark_mode": "full", "bbox": {"enabled": True}}}
-        sampled = {
-            "fixture_used": True,
-            "raw_tracking_frame": {
-                "timestamp_ms": 1,
-                "source_kind": "live_camera",
-                "source_id": "/dev/video0",
-                "tracking_state": "idle",
-                "frame_size": {"x": 640, "y": 480},
-                "hands": [{
-                    "index": 0,
-                    "label": "Left",
-                    "score": 0.9,
-                    "landmarks": [
-                        {"id": i, "x": 0.1 + (0.02 * i), "y": 0.2 + (0.01 * i), "z": -0.01 * i, "visibility": 1.0}
-                        for i in range(21)
-                    ],
-                }],
-            },
-            "notes": [],
-        }
-        result = probe._infer_pose_landmarks(sampled, runtime, tracking=tracking, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
-        self.assertTrue(result["ok"])
-        hand = result["raw_tracking_frame"]["hands"][0]
-        self.assertEqual(hand["landmark_count_after"], 21)
-        self.assertEqual(hand["bbox"]["landmark_mode"], "full")
-        self.assertGreater(hand["bbox"]["area"], 0.0)
-        self.assertEqual(result["raw_tracking_frame"]["vendor_hand_tracking"]["count"], 1)
 
     def test_pose_enabled_false_omits_pose_landmarks_but_surfaces_disabled_state(self):
         runtime = {"working_directory": tempfile.gettempdir()}
-        tracking = {"pose": {"enabled": False}, "hands": {"enabled": False}}
+        tracking = {"pose": {"enabled": False}}
         sampled = {
             "fixture_used": True,
             "raw_tracking_frame": {
@@ -580,7 +388,7 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
 
     def test_pose_inference_interval_frames_carries_forward_last_pose_sample(self):
         runtime = {"working_directory": tempfile.gettempdir()}
-        tracking = {"pose": {"enabled": True, "inference_interval_frames": 2}, "hands": {"enabled": False}}
+        tracking = {"pose": {"enabled": True, "inference_interval_frames": 2}}
         inference_session = {}
         first = probe._infer_pose_landmarks({
             "fixture_used": True,
@@ -620,88 +428,8 @@ class MediaPipeRuntimeProbeTests(unittest.TestCase):
         self.assertEqual(second_frame["vendor_pose_tracking"]["carried_forward"], True)
         self.assertEqual(second_frame["vendor_pose_tracking"]["source_frame_index"], 0)
 
-    def test_hand_inference_interval_frames_carries_forward_last_hand_sample(self):
-        runtime = {"working_directory": tempfile.gettempdir()}
-        tracking = {"pose": {"enabled": True, "inference_interval_frames": 1}, "hands": {"enabled": True, "landmark_mode": "lite", "inference_interval_frames": 2, "bbox": {"enabled": True}, "validity": {"max_stale_ms": 80, "reacquire_stable_ms": 0}}}
-        inference_session = {}
-        first = probe._infer_pose_landmarks({
-            "fixture_used": True,
-            "raw_tracking_frame": {
-                "timestamp_ms": 1,
-                "frame_index": 0,
-                "source_kind": "live_camera",
-                "source_id": "/dev/video0",
-                "tracking_state": "idle",
-                "hands": [{
-                    "label": "Left",
-                    "score": 0.91,
-                    "landmarks": [{"id": 0, "x": 0.25, "y": 0.50, "z": -0.1, "visibility": 0.9}],
-                    "bbox": {"x": 0.20, "y": 0.40, "width": 0.10, "height": 0.20},
-                }],
-            },
-            "notes": [],
-        }, runtime, tracking=tracking, inference_session=inference_session, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
-        self.assertTrue(first["ok"])
-        first_frame = first["raw_tracking_frame"]
-        self.assertEqual(first_frame["vendor_hand_tracking"]["inference_ran"], True)
-        self.assertEqual(first_frame["vendor_hand_tracking"]["carried_forward"], False)
-        self.assertEqual(first_frame["vendor_hand_tracking"]["source_frame_index"], 0)
-        self.assertEqual(len(first_frame.get("hands", [])), 1)
 
-        second = probe._infer_pose_landmarks({
-            "fixture_used": True,
-            "raw_tracking_frame": {
-                "timestamp_ms": 41,
-                "frame_index": 1,
-                "source_kind": "live_camera",
-                "source_id": "/dev/video0",
-                "tracking_state": "idle",
-                "hands": [{
-                    "label": "Left",
-                    "score": 0.33,
-                    "landmarks": [{"id": 0, "x": 0.75, "y": 0.10, "z": -0.4, "visibility": 0.2}],
-                    "bbox": {"x": 0.60, "y": 0.10, "width": 0.20, "height": 0.15},
-                }],
-            },
-            "notes": [],
-        }, runtime, tracking=tracking, inference_session=inference_session, tracking_semantics={"quality": "optimized", "overlay_mode": "optimized", "point_mode": "reduced", "filter_enabled": True}, filter_state={})
-        self.assertTrue(second["ok"])
-        second_frame = second["raw_tracking_frame"]
-        self.assertEqual(second_frame["frame_index"], 1)
-        self.assertEqual(second_frame["timestamp_ms"], 41)
-        self.assertEqual(second_frame.get("hands"), first_frame.get("hands"))
-        self.assertEqual(second_frame["vendor_hand_tracking"]["inference_ran"], False)
-        self.assertEqual(second_frame["vendor_hand_tracking"]["carried_forward"], True)
-        self.assertEqual(second_frame["vendor_hand_tracking"]["source_frame_index"], 0)
 
-    def test_hand_landmarks_from_source_tolerates_none_numeric_fields(self):
-        landmarks = probe._hand_landmarks_from_source([
-            types.SimpleNamespace(x=None, y=0.25, z=None, visibility=None),
-            types.SimpleNamespace(x=0.5, y=None, z=-0.75, visibility=0.6),
-        ])
-        self.assertEqual(len(landmarks), 2)
-        self.assertEqual(landmarks[0]["id"], 0)
-        self.assertEqual(landmarks[1]["id"], 1)
-        self.assertEqual(landmarks[0]["x"], 0.0)
-        self.assertEqual(landmarks[0]["y"], 0.25)
-        self.assertEqual(landmarks[0]["z"], 0.0)
-        self.assertEqual(landmarks[0]["visibility"], 1.0)
-        self.assertEqual(landmarks[1]["x"], 0.5)
-        self.assertEqual(landmarks[1]["y"], 0.0)
-        self.assertEqual(landmarks[1]["z"], -0.75)
-        self.assertEqual(landmarks[1]["visibility"], 0.6)
-
-    def test_tasks_hand_path_surfaces_unavailable_when_model_is_missing(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = {"working_directory": temp_dir}
-            tracking = {"hands": {"enabled": True, "landmark_mode": "lite", "bbox": {"enabled": True}}}
-            with mock.patch.dict("sys.modules", {"cv2": _FakeCv2, **_fake_tasks_mediapipe_module()}, clear=False):
-                hands_result = probe._infer_hands_with_mediapipe(runtime, tracking, frame_bgr=[[0]])
-                frame = probe._apply_hand_tracking({"timestamp_ms": 1}, tracking, runtime, hands_result)
-            self.assertTrue(hands_result["ok"])
-            self.assertFalse(frame["vendor_hand_tracking"]["available"])
-            self.assertEqual(frame["vendor_hand_tracking"]["error_info"]["code"], "mediapipe_model_missing")
-            self.assertFalse("hands" in frame)
 
     def test_runtime_reports_unsupported_package_when_neither_legacy_nor_tasks_api_exists(self):
         runtime = {"working_directory": os.getcwd()}

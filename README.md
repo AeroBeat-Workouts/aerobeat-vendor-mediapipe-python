@@ -74,21 +74,6 @@ Continuous runtime cadence and preview behavior are now controlled by the vendor
 
 On Linux `/dev/video*` live-camera sessions the runtime now treats V4L2 enumeration as the canonical reported-options source when `v4l2-ctl` is available, ranks candidates using Derrick's policy (**framerate first, resolution second, then format/backend quality**), and probes only the top shortlist through the actual OpenCV capture path before choosing a mode. When V4L2 enumeration is unavailable, it falls back to a bounded sane probe sweep instead of pretending the camera supports an arbitrary request.
 
-Hand-tracking raw vendor payloads are now also exposed for the next tracker slice:
-
-- optional `raw_tracking_frame.hands[]` entries containing MediaPipe-detected hand samples (`label`, `score`, emitted `landmarks`, and derived normalized-frame `bbox` geometry)
-- `tracking.hands.landmark_mode: lite|full` controls both the emitted landmark subset and which landmarks the vendor uses to derive bbox geometry
-  - `lite` uses a compact wrist/palm/fingertip subset for cheaper transport and intentionally produces a smaller bbox than `full`
-  - `full` emits all 21 landmarks and derives bbox geometry from the full set
-- `raw_tracking_frame.vendor_hand_tracking` surfaces the requested cadence knobs and hand timing budget the tracker layer must honor upstream (`inference_interval_frames`, `max_stale_ms`, `reacquire_stable_ms`, backend/model availability, and API limits)
-
-Important API truth for later slices:
-
-- MediaPipe does **not** expose stable per-hand IDs here; handedness labels can swap across frames and must be associated upstream.
-- Preview mirroring is presentation-only; raw hand coordinates stay camera-native and must be mirrored consistently with pose upstream.
-- The tasks backend runs `HandLandmarker` in `IMAGE` mode in this slice, so there is no vendor-side interpolation or per-hand timestamp beyond the parent frame timestamp.
-- If the host only exposes tasks-era MediaPipe and no hand `.task` asset is present, the vendor frame reports hand inference as unavailable instead of pretending stale/tracked semantics exist.
-
 The runtime reports that truth back through `health.capture_mode` and `camera_options`, distinguishing:
 
 - the original requested mode
